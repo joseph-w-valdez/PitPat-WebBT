@@ -190,16 +190,6 @@
             color: #06221f !important;
             border-color: transparent;
         }
-        .history {
-            width: min(1120px, 100%);
-            max-width: 100%;
-            min-width: 0;
-        }
-        .history h2 {
-            margin: 0 0 0.8rem;
-            font-size: 1.15rem;
-            letter-spacing: -0.03em;
-        }
         #connectBtn {
             width: 100%;
             background: var(--accent) !important;
@@ -230,68 +220,373 @@
         .chip-disconnected { background: #3a2a30 !important; color: #ffd5db !important; }
         .chip-paused { background: var(--amber) !important; color: #2a2208 !important; }
         .scan-results { display: none; text-align: center; }
-        .history-toolbar, #periodTotals, .history-table-container, #packetCapture {
+        .history {
             width: min(1120px, 100%);
-        }
-        .history-toolbar {
-            display: flex;
-            gap: 0.6rem;
-            margin-bottom: 0.8rem;
-        }
-        #periodTotals {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 0.75rem;
-            margin: 0 0 1rem;
-        }
-        .total-tile {
             background: var(--surface);
             border: 1px solid var(--line);
-            border-radius: 18px;
-            padding: 0.9rem 1rem;
+            border-radius: 22px;
+            padding: 1rem 1rem 1.1rem;
+            box-sizing: border-box;
         }
-        .total-tile span {
+        .cal-head {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .cal-title {
+            flex: 1;
+            text-align: center;
+            font-weight: 700;
+            font-size: 1.15rem;
+            letter-spacing: -0.03em;
+        }
+        .cal-nav, .month-day {
+            font-family: inherit;
+            color: var(--text);
+            cursor: pointer;
+        }
+        .cal-nav {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #222a38;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            height: 42px;
+            min-width: 42px;
+            font-size: 1.45rem;
+            line-height: 1;
+            padding: 0;
+        }
+        .cal-nav:focus-visible, .month-day:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .month-grid, .month-dows {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+        }
+        .month-day {
+            appearance: none;
+            border: 0;
+            background: transparent;
+            border-radius: 16px;
+            padding: 0.35rem 0 0.4rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.1rem;
+            min-width: 0;
+        }
+        .month-day.is-selected { background: #222a38; }
+        .month-dows {
+            margin-top: 0.7rem;
+            text-align: center;
+            font-size: 0.68rem;
+            font-weight: 650;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+        .dom {
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .month-day.is-today .dom { color: var(--accent); }
+        .ring { width: 26px; height: 26px; }
+        .ring circle { fill: none; stroke-width: 3.5; }
+        .ring .track { stroke: rgba(255, 255, 255, 0.12); }
+        .ring .fill {
+            stroke: var(--accent);
+            stroke-dasharray: 87.96;
+            stroke-dashoffset: 87.96;
+            transform: rotate(-90deg);
+            transform-origin: center;
+        }
+        .ring.is-half .fill { stroke: var(--amber); fill: var(--amber); stroke-dashoffset: 0; }
+        .ring.is-met .fill { stroke: var(--green); fill: var(--green); stroke-dashoffset: 0; }
+        .month-grid { gap: 0.15rem; margin-top: 0.2rem; }
+        .month-day.is-half { background: rgba(245, 196, 81, 0.22); }
+        .month-day.is-met { background: rgba(61, 220, 132, 0.22); }
+        .month-day.is-selected { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35); }
+        .month-day.is-out { opacity: 0.38; }
+        .goal-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            margin-top: 0.9rem;
+            padding: 0.85rem 0.9rem;
+            background: #222a38;
+            border-radius: 16px;
+        }
+        .goal-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }
+        .goal-track {
+            height: 14px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            overflow: hidden;
+        }
+        .goal-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: inherit;
+            background: var(--accent);
+        }
+        .goal-fill.is-half { background: var(--amber); }
+        .goal-fill.is-met { background: var(--green); }
+        .goal-progress {
+            margin-top: 0.15rem;
+            font-weight: 700;
+            font-size: 1.05rem;
+            letter-spacing: -0.03em;
+        }
+        .goal-progress.is-half { color: var(--amber); }
+        .goal-progress.is-met { color: var(--green); }
+        .goal-field {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            color: var(--muted);
+            font-weight: 700;
+        }
+        .goal-field input {
+            width: 4.6rem;
+            box-sizing: border-box;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 0.45rem 0.5rem;
+            font: inherit;
+            font-weight: 700;
+            color-scheme: dark;
+        }
+        .day-card {
+            margin: 0.75rem 0 0;
+            padding: 0.85rem 0.9rem 0.95rem;
+            background: #121722;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+        }
+        .day-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.55rem;
+        }
+        .day-date {
+            flex: 1;
+            min-width: 0;
+            background: transparent;
+            color: var(--text);
+            border: 0;
+            font: inherit;
+            font-weight: 700;
+            font-size: 1.05rem;
+            letter-spacing: -0.03em;
+            color-scheme: dark;
+        }
+        .day-metrics {
+            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.35rem 0.5rem;
+        }
+        .metric-label {
             display: block;
             color: var(--muted);
-            font-size: 0.78rem;
+            font-size: 0.68rem;
+            font-weight: 650;
             letter-spacing: 0.06em;
             text-transform: uppercase;
         }
-        .total-tile strong {
+        .metric-value, .day-miles {
             display: block;
-            margin-top: 0.3rem;
-            font-size: 1.35rem;
+            margin-top: 0.15rem;
+            font-weight: 700;
+            font-size: 1.05rem;
             letter-spacing: -0.03em;
         }
-        .history-table-container {
-            overflow-x: auto;
+        .day-miles {
             width: 100%;
-            max-width: 100%;
+            box-sizing: border-box;
+            padding: 0 0 0.1rem;
+            background: transparent;
+            color: var(--text);
+            border: 0;
+            border-bottom: 1px solid var(--line);
+            border-radius: 0;
+            font: inherit;
+            font-weight: 700;
+            font-size: 1.05rem;
+            letter-spacing: -0.03em;
+            color-scheme: dark;
         }
-        .mdl-data-table {
-            background: var(--surface) !important;
-            color: var(--text) !important;
-            border-radius: 18px;
-            width: 100%;
+        .walk-list {
+            margin-top: 0.95rem;
+            padding-top: 0.85rem;
+            border-top: 1px solid var(--line);
         }
-        .mdl-data-table th {
-            color: var(--muted) !important;
-            font-size: 0.75rem !important;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
+        .walk + .walk {
+            margin-top: 0.7rem;
+            padding-top: 0.7rem;
+            border-top: 1px solid var(--line);
         }
-        .mdl-data-table td { color: var(--text) !important; border-color: var(--line) !important; }
-        #packetCapture {
-            margin-top: 1.25rem;
+        .walk-time { font-weight: 700; }
+        .walk-now {
+            color: var(--accent);
+            font-weight: 700;
+            margin-right: 0.35rem;
+        }
+        .walk-meta, .history-empty {
             color: var(--muted);
-            line-height: 1.5;
+            margin: 0.25rem 0 0;
+            line-height: 1.4;
         }
-        #packetCapture h3 { color: var(--text); margin: 0 0 0.4rem; font-size: 1rem; }
-        #captureStatusHex, #captureStartHex {
-            margin-top: 0.6rem;
-            word-break: break-all;
-            font-family: ui-monospace, Consolas, monospace;
-            font-size: 0.78rem;
+        .stats {
+            width: min(1120px, 100%);
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 22px;
+            padding: 1rem;
+            box-sizing: border-box;
+        }
+        .range-tabs {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.35rem;
+            padding: 0.3rem;
+            background: #121722;
+            border-radius: 14px;
+        }
+        .range-tab, .chart-col {
+            font-family: inherit;
+            cursor: pointer;
+            border: 0;
+        }
+        .range-tab {
+            background: transparent;
+            color: var(--muted);
+            border-radius: 10px;
+            min-height: 36px;
+            font-weight: 700;
+        }
+        .range-tab.is-selected {
+            background: var(--text);
+            color: #12151c;
+        }
+        .stats-nav { margin-top: 0.9rem; }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.85rem 0.6rem;
+            margin-top: 1rem;
+        }
+        .stats-value {
+            display: block;
+            margin-top: 0.2rem;
+            font-size: 1.35rem;
+            font-weight: 750;
+            letter-spacing: -0.03em;
+        }
+        .chart {
+            margin-top: 1.1rem;
+            padding-top: 0.4rem;
+        }
+        .chart-plot {
+            display: flex;
+            align-items: flex-end;
+            gap: 0.25rem;
+            height: 148px;
+            position: relative;
+        }
+        .chart-plot::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 1.25rem;
+            height: 2px;
+            background: rgba(255, 139, 122, 0.55);
+            pointer-events: none;
+        }
+        .chart-col {
+            flex: 1 1 0;
+            min-width: 0;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 0;
+            background: transparent;
+            color: var(--muted);
+            padding: 0;
+        }
+        .chart-track {
+            flex: 1 1 auto;
+            width: 100%;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: center;
+        }
+        .chart-tip {
+            display: none;
+            background: #ff8b7a;
+            color: #3a120e;
+            font-size: 0.72rem;
+            font-weight: 750;
+            border-radius: 8px;
+            padding: 0.15rem 0.4rem;
+            white-space: nowrap;
+        }
+        .chart-col.is-selected .chart-tip { display: inline-block; }
+        .chart-col.is-selected .chart-tip.is-half { background: var(--amber); color: #2a2208; }
+        .chart-col.is-selected .chart-tip.is-met { background: var(--green); color: #06210f; }
+        .chart-bar {
+            display: block;
+            width: min(100%, 28px);
+            height: 0;
+            border-radius: 7px 7px 0 0;
+            background: rgba(255, 139, 122, 0.45);
+        }
+        .chart-bar.is-half { background: rgba(245, 196, 81, 0.78); }
+        .chart-bar.is-met { background: rgba(61, 220, 132, 0.8); }
+        .chart-col.is-selected .chart-bar { background: #ff8b7a; }
+        .chart-col.is-selected .chart-bar.is-half { background: var(--amber); }
+        .chart-col.is-selected .chart-bar.is-met { background: var(--green); }
+        .chart-label {
+            margin-top: 0;
+            height: 1.25rem;
+            line-height: 1.25rem;
+            font-size: 0.72rem;
+            font-weight: 650;
+            color: var(--muted);
+        }
+        .chart-col.is-selected .chart-label { color: var(--text); }
+        .stats-sessions { margin-top: 0.4rem; }
+        .stat-session {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.75rem;
+            align-items: flex-start;
+            padding: 0.8rem 0.1rem 0.15rem;
+            border-top: 1px solid var(--line);
+            margin-top: 0.7rem;
+        }
+        .stat-when {
+            color: var(--muted);
+            font-size: 0.85rem;
+            white-space: nowrap;
         }
         @media (max-width: 520px) {
             .app-bar, .page { padding-left: 0.7rem; padding-right: 0.7rem; }
@@ -302,6 +597,10 @@
                 padding-left: 0.35rem !important;
                 padding-right: 0.35rem !important;
             }
+            .history, .stats { padding: 0.85rem 0.75rem 1rem; }
+            .stats-value { font-size: 1.15rem; }
+            .day-metrics { grid-template-columns: 1fr 1fr; }
+            .metric-value, .day-miles { font-size: 1rem; }
         }
         @media (min-width: 720px) {
             .stage {
@@ -312,8 +611,6 @@
             }
             .dashboard { grid-template-columns: 1fr 1fr; }
             .control-dock { position: sticky; top: 0.75rem; }
-            #periodTotals { grid-template-columns: repeat(4, 1fr); }
-            .mdl-data-table th, .mdl-data-table td { padding: 0.85rem 1rem; }
         }
     </style>
 </head>
@@ -373,39 +670,68 @@
                     </div>
                     </div>
                     </div>
-            <section class="history">
-                <h2>History</h2>
-                    <div class="history-toolbar">
-                        <button id="exportHistoryBtn" class="mdl-button mdl-js-button mdl-button--raised mdl-js-ripple-effect">Export</button>
-                        <button id="importHistoryBtn" class="mdl-button mdl-js-button mdl-button--raised mdl-js-ripple-effect">Import</button>
-                        <input type="file" id="importHistoryInput" accept="application/json" style="display:none;" />
+        <section class="stats" id="stats">
+            <div class="range-tabs" id="rangeTabs">
+                <button type="button" class="range-tab" data-range="week">Week</button>
+                <button type="button" class="range-tab is-selected" data-range="month">Month</button>
+                <button type="button" class="range-tab" data-range="year">Year</button>
+                <button type="button" class="range-tab" data-range="total">Life</button>
+            </div>
+            <div class="cal-head stats-nav">
+                <button type="button" class="cal-nav" data-stats="prev" aria-label="Previous">‹</button>
+                <div class="cal-title" id="statsTitle"></div>
+                <button type="button" class="cal-nav" data-stats="next" aria-label="Next">›</button>
+            </div>
+            <div class="stats-grid" id="statsGrid"></div>
+            <div class="chart" id="statsChart"></div>
+            <div class="goal-panel" id="goalPanel">
+                <div class="goal-top">
+                    <div>
+                        <span class="metric-label" id="goalLabel">Month goal</span>
+                        <div class="goal-progress" id="goalProgress"></div>
                     </div>
-                    <div id="periodTotals"></div>
-                    <div class="history-table-container">
-                        <table class="mdl-data-table mdl-js-data-table mdl-shadow--2dp" >
-                            <thead>
-                                <tr>
-                                    <th>Date</th>
-                                    <th>Duration</th>
-                                    <th>Distance</th>
-                                    <th>Steps</th>
-                                    <th>Calories</th>
-                                    <th>Avg Speed</th>
-                                    <th>Action</th>
-                                </tr>
-                            </thead>
-                            <tbody id="historyTableBody">
-                                <!-- Sessions will be injected here -->
-                            </tbody>
-                        </table>
+                    <label class="goal-field">
+                        <span class="metric-label">Daily</span>
+                        <input id="goalInput" type="number" min="0.1" step="0.1" inputmode="decimal" aria-label="Daily goal in miles">
+                        <span>mi</span>
+                    </label>
+                </div>
+                <div class="goal-track" id="goalTrack" aria-hidden="true"><div class="goal-fill" id="goalFill"></div></div>
+                <div class="goal-top">
+                    <span class="metric-label">Weight</span>
+                    <label class="goal-field">
+                        <input id="weightInput" type="number" min="50" max="500" step="1" inputmode="decimal" aria-label="Weight in pounds">
+                        <span>lb</span>
+                    </label>
+                </div>
+            </div>
+            <div class="day-card" id="dayCard">
+                <div class="day-heading">
+                    <button type="button" class="cal-nav" data-day="prev" aria-label="Previous day">‹</button>
+                    <input id="dayDateInput" class="day-date" type="date" aria-label="Day to edit">
+                    <button type="button" class="cal-nav" data-day="next" aria-label="Next day">›</button>
+                </div>
+                <div class="day-metrics">
+                    <label>
+                        <span class="metric-label">Miles</span>
+                        <input id="dayMilesInput" class="day-miles" type="number" min="0" step="0.01" inputmode="decimal" aria-label="Miles for this day">
+                    </label>
+                    <div>
+                        <span class="metric-label">Time</span>
+                        <span class="metric-value" id="dayTime">0:00</span>
                     </div>
-                    <div id="packetCapture">
-                        <h3 style="margin:0 0 0.4em;">Saved packets</h3>
-                        <div id="captureDecoded">No status packet saved yet.</div>
-                        <div id="captureStatusHex" style="margin-top:0.6em;word-break:break-all;font-family:monospace;font-size:0.8em;"></div>
-                        <div id="captureStartHex" style="margin-top:0.6em;word-break:break-all;font-family:monospace;font-size:0.8em;"></div>
+                    <div>
+                        <span class="metric-label">Calories</span>
+                        <span class="metric-value" id="dayCalories">0</span>
                     </div>
-            </section>
+                    <div>
+                        <span class="metric-label">Steps</span>
+                        <span class="metric-value" id="daySteps">0</span>
+                    </div>
+                </div>
+                <p class="history-empty" id="dayEstimate" hidden>Estimated at 2.5 mph</p>
+            </div>
+        </section>
     </main>
     <!-- Loading Overlay -->
     <div id="loadingOverlay" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,255,255,0.7);z-index:9999;align-items:center;justify-content:center;">
@@ -420,7 +746,6 @@
         <div class="mdl-snackbar__text"></div>
         <button class="mdl-snackbar__action" type="button"></button>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/date-fns@4.1.0/cdn.min.js"></script>
-    <script src="treadmill.js?v=5"></script>
+    <script src="treadmill.js?v=21"></script>
 </body>
 </html>

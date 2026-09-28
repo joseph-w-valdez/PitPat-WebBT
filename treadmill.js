@@ -25,113 +25,27 @@ const statusChip = document.getElementById('statusChip');
 const loadingOverlay = document.getElementById('loadingOverlay');
 const countdownOverlay = document.getElementById('countdownOverlay');
 const countdownNumber = document.getElementById('countdownNumber');
-const historyTableBody = document.getElementById('historyTableBody');
-const importHistoryBtn = document.getElementById('importHistoryBtn');
-const exportHistoryBtn = document.getElementById('exportHistoryBtn');
-const importHistoryInput = document.getElementById('importHistoryInput');
 const snackbar = document.getElementById('snackbar');
 
-// --- Session History Logic ---
-let sessionActive = false;
-let sessionStartData = null;
-let lastSession = null;
-
-function loadSessions() {
-    let sessions = [];
-    try {
-        sessions = JSON.parse(localStorage.getItem('treadmill_sessions') || '[]');
-    } catch {}
-    return Array.isArray(sessions) ? sessions : [];
-}
-function saveSessions(sessions) {
-    localStorage.setItem('treadmill_sessions', JSON.stringify(sessions));
-}
-function addSession(session) {
-    const sessions = loadSessions();
-    sessions.unshift(session); // newest first
-    saveSessions(sessions);
-    renderSessionTable();
-}
-function deleteSession(idx) {
-    const sessions = loadSessions();
-    sessions.splice(idx, 1);
-    saveSessions(sessions);
-    renderSessionTable();
-}
-function renderSessionTable() {
-    const sessions = loadSessions();
-    historyTableBody.innerHTML = '';
-    sessions.forEach((s, i) => {
-        let avgSpeedDisplay = '-';
-        const avgNumber = typeof s.avgSpeed === 'number' ? s.avgSpeed : parseFloat(s.avgSpeed);
-        if (!isNaN(avgNumber)) {
-            const mph = s.speedUnit === 'kph' ? avgNumber * KM_TO_MI : avgNumber;
-            avgSpeedDisplay = mph.toFixed(2) + ' mph';
-        }
-        let dateStr = '-';
-        if (typeof s.date === 'number' || typeof s.date === 'string') {
-            dateStr = dateFns.formatRelative(new Date(s.date), new Date());
-        }
-        let distanceDisplay = '-';
-        const miles = milesFromSession(s);
-        if (miles > 0 || s.distance === 0) {
-            distanceDisplay = miles.toFixed(2) + ' mi';
-        }
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-            <td>${dateStr}</td>
-            <td>${formatDuration(s.duration)}</td>
-            <td>${distanceDisplay}</td>
-            <td>${s.steps}</td>
-            <td>${s.calories}</td>
-            <td>${avgSpeedDisplay}</td>
-            <td><button class="mdl-button mdl-js-button mdl-button--icon" title="Delete" onclick="window.deleteSessionFromTable(${i})"><i class="material-icons">delete</i></button></td>
-        `;
-        historyTableBody.appendChild(tr);
-    });
-    renderPeriodTotals(sessions);
-}
 function toMiles(value, unit) {
     if (unit === 'km' || unit === 'kph') return value * KM_TO_MI;
     return value;
-}
-function milesFromSession(session) {
-    const value = typeof session.distance === 'number' ? session.distance : parseFloat(session.distance);
-    if (isNaN(value)) return 0;
-    return toMiles(value, session.distanceUnit);
 }
 function mphToProtocol(mph) {
     const kph = Math.min(6, Math.max(1, mph / KM_TO_MI));
     return Math.round(kph * 1000);
 }
-function renderPeriodTotals(sessions) {
-    const el = document.getElementById('periodTotals');
-    if (!el || typeof dateFns === 'undefined') return;
-    const now = new Date();
-    const periods = [
-        ['Today', dateFns.startOfDay(now)],
-        ['This week', dateFns.startOfWeek(now)],
-        ['This month', dateFns.startOfMonth(now)],
-        ['This year', dateFns.startOfYear(now)]
-    ];
-    el.innerHTML = periods.map(([label, start]) => {
-        let distance = 0;
-        sessions.forEach((s) => {
-            const when = new Date(s.date);
-            if (isNaN(when.getTime()) || when < start || when > now) return;
-            distance += milesFromSession(s);
-        });
-        return '<div class="total-tile"><span>' + label + '</span><strong>' + distance.toFixed(2) + ' mi</strong></div>';
-    }).join('');
-}
-window.deleteSessionFromTable = deleteSession;
 
 // --- State ---
 let treadmillData = {};
 let connected = false;
-let androidListenOnly = false;
 let runningState = 3; // 0: Starting, 1: Running, 2: Paused, 3: Stopped
 let curTargetSpeed = 1000; // in treadmill units
+let sessionActive = false;
+let sessionLive = false;
+let sessionStartData = null;
+let selectedDate = startOfDay(new Date());
+let statsRange = 'month';
 
 // --- Helper Functions ---
 
@@ -196,17 +110,17 @@ function updateRunningState(state) {
                 startBtn.textContent = "Start";
                 break;
             case 1: // Running
-                enableControls(!androidListenOnly);
+                enableControls(true);
                 startBtn.textContent = "Pause";
                 setStatus('Running');
                 break;
             case 2: // Paused
-                enableControls(!androidListenOnly);
+                enableControls(true);
                 startBtn.textContent = "Start";
                 setStatus('Paused');
                 break;
             case 3: // Stopped
-                enableControls(!androidListenOnly);
+                enableControls(true);
                 startBtn.textContent = "Start";
                 setStatus('Stopped');
                 break;
@@ -229,7 +143,8 @@ function publishWidget(statusOverride, force) {
         else status = 'Stopped';
     }
     const now = Date.now();
-    const key = String(connected) + '|' + runningState + '|' + status;
+    const goalProgress = goalWidgetProgress();
+    const key = String(connected) + '|' + runningState + '|' + status + '|' + goalProgress;
     if (!force && key === publishWidget.lastKey && now - (publishWidget.lastAt || 0) < 500) return;
     publishWidget.lastKey = key;
     publishWidget.lastAt = now;
@@ -244,7 +159,40 @@ function publishWidget(statusOverride, force) {
         if (typeof treadmillData.duration === 'number') time = widgetClock(treadmillData.duration);
     }
     const preset = speedSlider ? speedSlider.value : '';
-    window.PitPatAndroid.setWidgetState(!!connected, runningState === 1, status, speed, time, calories, distance, preset);
+    window.PitPatAndroid.setWidgetState(!!connected, runningState === 1, status, speed, time, calories, distance, preset, goalProgress);
+}
+function periodSnapshot(range, anchor, grouped) {
+    const totals = collectRange(range, anchor, grouped);
+    const goal = periodGoal(range, anchor);
+    return {
+        title: statsHeading(range, anchor),
+        seconds: totals.seconds,
+        miles: Math.round(totals.miles * 100) / 100,
+        goal: Math.round(goal * 10) / 10,
+        level: goalLevel(totals.miles, goal),
+        calories: Math.round(totals.calories),
+        days: totals.days,
+        sessions: totals.sessions,
+        bars: statsBuckets(range, anchor, grouped).map((bucket) => ({
+            label: bucket.label,
+            seconds: bucket.seconds,
+            miles: Math.round(bucket.miles * 100) / 100,
+            goal: Math.round((bucket.goal || 0) * 100) / 100,
+            selected: bucket.selected,
+            level: bucket.level
+        }))
+    };
+}
+function publishStatsSnapshot() {
+    if (!window.PitPatAndroid || !window.PitPatAndroid.setStatsSnapshot) return;
+    const grouped = groupSessions();
+    const today = startOfDay(new Date());
+    const payload = JSON.stringify({
+        week: periodSnapshot('week', today, grouped)
+    });
+    if (payload === publishStatsSnapshot.last) return;
+    publishStatsSnapshot.last = payload;
+    window.PitPatAndroid.setStatsSnapshot(payload);
 }
 function widgetClock(seconds) {
     seconds = Math.max(0, Math.floor(seconds) || 0);
@@ -267,6 +215,554 @@ function formatDuration(seconds) {
     parts.push(s + 's');
     return parts.join(' ');
 }
+
+function startOfDay(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+function addDays(date, days) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+function addMonths(date, delta) {
+    const first = new Date(date.getFullYear(), date.getMonth() + delta, 1);
+    const last = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+    return new Date(first.getFullYear(), first.getMonth(), Math.min(date.getDate(), last));
+}
+function startOfWeek(date) {
+    const day = date.getDay();
+    const delta = day === 0 ? -6 : 1 - day;
+    return addDays(date, delta);
+}
+function sameDay(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+function dateKey(date) {
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return date.getFullYear() + '-' + m + '-' + d;
+}
+function parseDateKey(key) {
+    const parts = String(key).split('-').map(Number);
+    return new Date(parts[0], (parts[1] || 1) - 1, parts[2] || 1);
+}
+function esc(text) {
+    return String(text).replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+}
+function loadSessions() {
+    try {
+        const sessions = JSON.parse(localStorage.getItem('treadmill_sessions') || '[]');
+        return Array.isArray(sessions) ? sessions.filter((s) => s && s.date) : [];
+    } catch {
+        return [];
+    }
+}
+function saveSessions(sessions) {
+    localStorage.setItem('treadmill_sessions', JSON.stringify(sessions));
+}
+function bakeImportedWalk(row) {
+    const miles = Math.round(Number(row.m) * 100) / 100;
+    const estimate = estimateWalk(miles);
+    return {
+        date: row.d,
+        duration: estimate.seconds,
+        steps: estimate.steps,
+        calories: estimate.calories + ' kcal',
+        avgSpeed: WALK_MPH,
+        speedUnit: 'mph',
+        distance: miles,
+        distanceUnit: 'mi',
+        imported: true
+    };
+}
+function importMonthHistory() {
+    if (importMonthHistory.started || localStorage.getItem('treadmill_month_import_v1')) return Promise.resolve();
+    importMonthHistory.started = true;
+    return fetch('sessions.json').then((res) => {
+        if (!res.ok) throw new Error('missing import');
+        return res.json();
+    }).then((rows) => {
+        if (!Array.isArray(rows) || !rows.length) return;
+        const added = rows.filter((row) => row && row.d && row.m > 0).map(bakeImportedWalk);
+        saveSessions(loadSessions().concat(added));
+        localStorage.setItem('treadmill_month_import_v1', '1');
+    }).catch(() => {
+        importMonthHistory.started = false;
+    });
+}
+function saveCurrentSession(session) {
+    localStorage.setItem('treadmill_current_session', JSON.stringify(session));
+}
+function loadCurrentSession() {
+    try {
+        return JSON.parse(localStorage.getItem('treadmill_current_session')) || null;
+    } catch {
+        return null;
+    }
+}
+function clearCurrentSession() {
+    localStorage.removeItem('treadmill_current_session');
+}
+function sessionMiles(session) {
+    const value = typeof session.distance === 'number' ? session.distance : parseFloat(session.distance);
+    if (isNaN(value)) return 0;
+    return toMiles(value, session.distanceUnit);
+}
+function sessionSeconds(session) {
+    return typeof session.duration === 'number' && isFinite(session.duration) ? session.duration : 0;
+}
+function sessionCalories(session) {
+    const value = typeof session.calories === 'number' ? session.calories : parseFloat(session.calories);
+    return isNaN(value) ? 0 : value;
+}
+function sessionSteps(session) {
+    const value = typeof session.steps === 'number' ? session.steps : parseInt(session.steps, 10);
+    return isNaN(value) ? 0 : value;
+}
+function sessionWhen(session) {
+    const t = typeof session.date === 'number' ? session.date : Date.parse(session.date);
+    return t && !isNaN(t) ? new Date(t) : null;
+}
+function formatPace(seconds, miles) {
+    if (!(miles > 0.01) || !(seconds > 0)) return '';
+    const total = Math.round(seconds / miles);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return m + ':' + String(s).padStart(2, '0') + ' /mi';
+}
+function groupSessions() {
+    const map = new Map();
+    loadSessions().forEach((session) => {
+        const when = sessionWhen(session);
+        if (!when) return;
+        const key = dateKey(when);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(session);
+    });
+    map.forEach((list) => list.sort((a, b) => b.date - a.date));
+    return map;
+}
+function currentSessionRecord() {
+    const count = sessionStartData.speedCount || 1;
+    const rawAvg = (sessionStartData.speedSum || 0) / count / 1000;
+    return {
+        date: sessionStartData.date,
+        duration: sessionStartData.duration || 0,
+        steps: sessionStartData.steps || 0,
+        calories: (sessionStartData.calories || 0) + ' kcal',
+        avgSpeed: toMiles(rawAvg, sessionStartData.speedUnit),
+        speedUnit: 'mph',
+        distance: toMiles((sessionStartData.distance || 0) / 1000, sessionStartData.distanceUnit),
+        distanceUnit: 'mi'
+    };
+}
+function upsertSession(session) {
+    const sessions = loadSessions();
+    const idx = sessions.findIndex((s) => s.date === session.date);
+    if (idx >= 0) sessions[idx] = session;
+    else sessions.unshift(session);
+    saveSessions(sessions);
+}
+function absorbWalk(sample, countSpeed) {
+    const durationSec = Math.round((sample.durationMs || 0) / 1000);
+    sessionStartData.steps = Math.max(sessionStartData.steps || 0, sample.steps || 0);
+    sessionStartData.calories = Math.max(sessionStartData.calories || 0, sample.calories || 0);
+    sessionStartData.distance = Math.max(sessionStartData.distance || 0, sample.distance || 0);
+    sessionStartData.duration = Math.max(sessionStartData.duration || 0, durationSec);
+    if (sample.distance_unit) sessionStartData.distanceUnit = sample.distance_unit;
+    if (countSpeed) {
+        sessionStartData.speedSum = (sessionStartData.speedSum || 0) + (sample.current_speed || 0);
+        sessionStartData.speedCount = (sessionStartData.speedCount || 0) + 1;
+        sessionStartData.speedUnit = sample.speed_unit;
+    }
+    sessionStartData.updatedAt = Date.now();
+}
+function commitWalk(force) {
+    if (!sessionStartData) return;
+    const now = Date.now();
+    if (!force && now - (commitWalk.lastAt || 0) < 2000) return;
+    commitWalk.lastAt = now;
+    upsertSession(currentSessionRecord());
+    renderHistory();
+}
+function finishWalk() {
+    if (!sessionActive || !sessionStartData) return;
+    const record = currentSessionRecord();
+    sessionActive = false;
+    sessionLive = false;
+    sessionStartData = null;
+    clearCurrentSession();
+    const keep = (record.duration || 0) >= 1 || sessionMiles(record) >= 0.001;
+    if (keep) upsertSession(record);
+    else saveSessions(loadSessions().filter((s) => s.date !== record.date));
+    renderHistory();
+}
+function suspendWalk() {
+    if (!sessionActive || !sessionStartData) return;
+    sessionLive = false;
+    saveCurrentSession(sessionStartData);
+    commitWalk(true);
+}
+function trackWalk(sample) {
+    const state = sample.running_state;
+    const durationSec = Math.round((sample.durationMs || 0) / 1000);
+    if (sessionActive && sessionStartData && state === 1 && durationSec + 2 < (sessionStartData.duration || 0)) {
+        finishWalk();
+    }
+    if (state === 1 && !sessionActive) {
+        sessionActive = true;
+        sessionLive = true;
+        sessionStartData = {
+            date: Date.now(),
+            steps: sample.steps || 0,
+            calories: sample.calories || 0,
+            distance: sample.distance || 0,
+            duration: durationSec,
+            speedSum: sample.current_speed || 0,
+            speedCount: 1,
+            speedUnit: sample.speed_unit,
+            distanceUnit: sample.distance_unit,
+            updatedAt: Date.now()
+        };
+        saveCurrentSession(sessionStartData);
+        commitWalk(true);
+        return;
+    }
+    if (!sessionActive || !sessionStartData) return;
+    if (state === 1 || state === 2) {
+        sessionLive = true;
+        absorbWalk(sample, state === 1);
+        saveCurrentSession(sessionStartData);
+        commitWalk(false);
+        return;
+    }
+    if (state === 3) {
+        absorbWalk(sample, false);
+        finishWalk();
+    }
+}
+function loadDayMiles() {
+    try {
+        const data = JSON.parse(localStorage.getItem('treadmill_day_miles') || '{}');
+        return data && typeof data === 'object' ? data : {};
+    } catch {
+        return {};
+    }
+}
+function goalWidgetProgress() {
+    const goal = loadDailyGoal();
+    if (!(goal > 0)) return 0;
+    const today = dateKey(new Date());
+    const sessions = loadSessions().filter((session) => {
+        const when = sessionWhen(session);
+        return when && dateKey(when) === today;
+    });
+    if (sessionActive && sessionStartData && dateKey(new Date(sessionStartData.date)) === today) {
+        const live = currentSessionRecord();
+        const idx = sessions.findIndex((session) => session.date === live.date);
+        if (idx >= 0) sessions[idx] = live;
+        else sessions.push(live);
+    }
+    const miles = milesForDay(today, sumSessions(sessions).miles);
+    return Math.max(0, Math.min(1000, Math.round((miles / goal) * 1000)));
+}
+function milesForDay(key, recorded) {
+    const stored = loadDayMiles()[key];
+    const value = typeof stored === 'number' ? stored : parseFloat(stored);
+    return isFinite(value) && value >= 0 ? value : recorded;
+}
+function setDayMiles(key, miles) {
+    const map = loadDayMiles();
+    if (miles === null) delete map[key];
+    else map[key] = miles;
+    localStorage.setItem('treadmill_day_miles', JSON.stringify(map));
+}
+const WALK_MPH = 2.5;
+const WALK_MET = 3;
+const STEPS_PER_MILE = 2200;
+const LB_TO_KG = 0.45359237;
+
+function loadWeightLb() {
+    const value = parseFloat(localStorage.getItem('treadmill_weight_lb'));
+    return isFinite(value) && value > 0 ? value : 176;
+}
+function estimateWalk(miles) {
+    const hours = (miles || 0) / WALK_MPH;
+    const kg = loadWeightLb() * LB_TO_KG;
+    return {
+        seconds: Math.round(hours * 3600),
+        calories: Math.round(WALK_MET * kg * hours),
+        steps: Math.round((miles || 0) * STEPS_PER_MILE)
+    };
+}
+function dayFigures(key, part) {
+    const miles = milesForDay(key, part.miles);
+    const overridden = Object.prototype.hasOwnProperty.call(loadDayMiles(), key);
+    if (!overridden) return { miles, seconds: part.seconds, calories: part.calories, steps: part.steps, estimated: false };
+    const estimate = estimateWalk(miles);
+    return { miles, seconds: estimate.seconds, calories: estimate.calories, steps: estimate.steps, estimated: true };
+}
+function loadDailyGoal() {
+    const value = parseFloat(localStorage.getItem('treadmill_daily_goal_mi'));
+    return isFinite(value) && value > 0 ? value : 2;
+}
+function goalLevel(miles, goal) {
+    if (!(goal > 0) || !(miles >= goal / 2)) return '';
+    return miles >= goal ? 'met' : 'half';
+}
+function ringHtml(level) {
+    const cls = 'ring' + (level ? ' is-' + level : '');
+    return '<svg class="' + cls + '" viewBox="0 0 36 36" aria-hidden="true"><circle class="track" cx="18" cy="18" r="14"></circle><circle class="fill" cx="18" cy="18" r="14"></circle></svg>';
+}
+function sumSessions(list) {
+    return list.reduce((acc, session) => {
+        acc.miles += sessionMiles(session);
+        acc.seconds += sessionSeconds(session);
+        acc.calories += sessionCalories(session);
+        acc.steps += sessionSteps(session);
+        return acc;
+    }, { miles: 0, seconds: 0, calories: 0, steps: 0 });
+}
+function renderHistory() {
+    const grouped = groupSessions();
+    const period = collectRange(statsRange, selectedDate, grouped);
+    const target = periodGoal(statsRange, selectedDate);
+    const periodLevel = goalLevel(period.miles, target);
+    const dayCard = document.getElementById('dayCard');
+    if (dayCard) dayCard.hidden = false;
+    const dayList = grouped.get(dateKey(selectedDate)) || [];
+    const figures = dayFigures(dateKey(selectedDate), sumSessions(dayList));
+    const dayDateInput = document.getElementById('dayDateInput');
+    const dayMilesInput = document.getElementById('dayMilesInput');
+    const dayTime = document.getElementById('dayTime');
+    const dayCalories = document.getElementById('dayCalories');
+    const daySteps = document.getElementById('daySteps');
+    if (dayDateInput && document.activeElement !== dayDateInput) dayDateInput.value = dateKey(selectedDate);
+    if (dayMilesInput && document.activeElement !== dayMilesInput) dayMilesInput.value = figures.miles.toFixed(2);
+    if (dayTime) dayTime.textContent = widgetClock(figures.seconds);
+    if (dayCalories) dayCalories.textContent = Math.round(figures.calories).toLocaleString();
+    if (daySteps) daySteps.textContent = Math.round(figures.steps).toLocaleString();
+    const dayEstimate = document.getElementById('dayEstimate');
+    if (dayEstimate) dayEstimate.hidden = !figures.estimated;
+    const life = statsRange === 'total';
+    const goalNames = { week: 'Week goal', month: 'Month goal', year: 'Year goal' };
+    const goalLabel = document.getElementById('goalLabel');
+    const goalProgress = document.getElementById('goalProgress');
+    const goalInput = document.getElementById('goalInput');
+    const goalTrack = document.getElementById('goalTrack');
+    if (goalLabel) goalLabel.textContent = life ? 'All time' : (goalNames[statsRange] || 'Goal');
+    if (goalProgress) {
+        goalProgress.textContent = life ? period.miles.toFixed(2) + ' mi' : period.miles.toFixed(2) + ' / ' + target.toFixed(1) + ' mi';
+        goalProgress.classList.toggle('is-half', !life && periodLevel === 'half');
+        goalProgress.classList.toggle('is-met', !life && periodLevel === 'met');
+    }
+    if (goalTrack) goalTrack.hidden = life;
+    if (goalInput && document.activeElement !== goalInput) goalInput.value = loadDailyGoal().toFixed(1);
+    const weightInput = document.getElementById('weightInput');
+    if (weightInput && document.activeElement !== weightInput) weightInput.value = String(loadWeightLb());
+    const goalFill = document.getElementById('goalFill');
+    if (goalFill) {
+        const pct = !life && target > 0 ? Math.max(0, Math.min(100, (period.miles / target) * 100)) : 0;
+        goalFill.style.width = pct + '%';
+        goalFill.classList.toggle('is-half', periodLevel === 'half');
+        goalFill.classList.toggle('is-met', periodLevel === 'met');
+    }
+    publishWidget();
+    publishStatsSnapshot();
+    renderStats(grouped);
+}
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEK_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+function dateInStatsRange(date, range, anchor) {
+    if (range === 'total') return true;
+    if (range === 'day') return sameDay(date, anchor);
+    if (range === 'week') {
+        const start = startOfWeek(anchor);
+        return date >= start && date < addDays(start, 7);
+    }
+    if (range === 'month') return date.getFullYear() === anchor.getFullYear() && date.getMonth() === anchor.getMonth();
+    return date.getFullYear() === anchor.getFullYear();
+}
+function clampDay(year, month, day) {
+    const last = new Date(year, month + 1, 0).getDate();
+    return new Date(year, month, Math.min(day, last));
+}
+function collectRange(range, anchor, grouped) {
+    const keys = new Set([...grouped.keys(), ...Object.keys(loadDayMiles())]);
+    const totals = { miles: 0, seconds: 0, calories: 0, steps: 0, sessions: 0, days: 0 };
+    keys.forEach((key) => {
+        const date = parseDateKey(key);
+        if (!dateInStatsRange(date, range, anchor)) return;
+        const list = grouped.get(key) || [];
+        const part = sumSessions(list);
+        const figures = dayFigures(key, part);
+        totals.miles += figures.miles;
+        totals.seconds += figures.seconds;
+        totals.calories += figures.calories;
+        totals.steps += figures.steps;
+        totals.sessions += list.length;
+        if (figures.miles > 0 || list.length > 0) totals.days += 1;
+    });
+    return totals;
+}
+function formatClockLong(seconds) {
+    seconds = Math.max(0, Math.floor(seconds) || 0);
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+function daysInMonthDate(date) {
+    return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+}
+function daysInYearDate(date) {
+    const year = date.getFullYear();
+    return new Date(year, 1, 29).getDate() === 29 ? 366 : 365;
+}
+function periodGoal(range, anchor) {
+    const daily = loadDailyGoal();
+    if (range === 'week') return daily * 7;
+    if (range === 'month') return daily * daysInMonthDate(anchor);
+    if (range === 'year') return daily * daysInYearDate(anchor);
+    return daily;
+}
+function sumDayList(dates, grouped) {
+    const totals = { miles: 0, seconds: 0, calories: 0, steps: 0, sessions: 0, days: 0 };
+    dates.forEach((date) => {
+        const key = dateKey(date);
+        const list = grouped.get(key) || [];
+        const figures = dayFigures(key, sumSessions(list));
+        totals.miles += figures.miles;
+        totals.seconds += figures.seconds;
+        totals.calories += figures.calories;
+        totals.steps += figures.steps;
+        totals.sessions += list.length;
+        if (figures.miles > 0 || list.length > 0) totals.days += 1;
+    });
+    return totals;
+}
+function chartBar(date, label, selected, totals, goal) {
+    return {
+        date,
+        label,
+        selected,
+        seconds: totals.seconds,
+        miles: totals.miles,
+        goal,
+        level: goalLevel(totals.miles, goal)
+    };
+}
+function statsBuckets(range, anchor, grouped) {
+    const daily = loadDailyGoal();
+    if (range === 'week') {
+        const start = startOfWeek(anchor);
+        return Array.from({ length: 7 }, (_, i) => {
+            const date = addDays(start, i);
+            return chartBar(date, WEEK_LABELS[i], sameDay(date, anchor), collectRange('day', date, grouped), daily);
+        });
+    }
+    if (range === 'month') {
+        const year = anchor.getFullYear();
+        const month = anchor.getMonth();
+        const monthEnd = new Date(year, month + 1, 1);
+        const selectedWeek = startOfWeek(anchor);
+        const bars = [];
+        let cursor = startOfWeek(new Date(year, month, 1));
+        while (cursor < monthEnd) {
+            const days = [];
+            for (let i = 0; i < 7; i++) {
+                const date = addDays(cursor, i);
+                if (date.getFullYear() === year && date.getMonth() === month) days.push(date);
+            }
+            bars.push(chartBar(days[0], String(days[0].getDate()), sameDay(cursor, selectedWeek), sumDayList(days, grouped), daily * days.length));
+            cursor = addDays(cursor, 7);
+        }
+        return bars;
+    }
+    const year = anchor.getFullYear();
+    return MONTH_LABELS.map((label, month) => {
+        const date = new Date(year, month, 1);
+        return chartBar(date, label, month === anchor.getMonth(), collectRange('month', date, grouped), daily * daysInMonthDate(date));
+    });
+}
+function statsHeading(range, anchor) {
+    if (range === 'total') return 'All time';
+    if (range === 'year') return String(anchor.getFullYear());
+    if (range === 'month') return anchor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    if (range === 'day') return anchor.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const start = startOfWeek(anchor);
+    const end = addDays(start, 6);
+    const left = start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const right = end.toLocaleDateString(undefined, start.getMonth() === end.getMonth() ? { day: 'numeric' } : { month: 'short', day: 'numeric' });
+    return left + ' – ' + right;
+}
+function renderStats(grouped) {
+    const grid = document.getElementById('statsGrid');
+    const chart = document.getElementById('statsChart');
+    const title = document.getElementById('statsTitle');
+    if (!grid || !chart || !title) return;
+    if (!grouped) grouped = groupSessions();
+    document.querySelectorAll('.range-tab').forEach((tab) => {
+        tab.classList.toggle('is-selected', tab.dataset.range === statsRange);
+    });
+    document.querySelectorAll('[data-stats]').forEach((btn) => { btn.hidden = statsRange === 'total'; });
+    title.textContent = statsHeading(statsRange, selectedDate);
+    const totals = collectRange(statsRange, selectedDate, grouped);
+    grid.innerHTML = [
+        ['Duration', formatClockLong(totals.seconds)],
+        ['Distance', totals.miles.toFixed(2) + ' mi'],
+        ['Calories', Math.round(totals.calories).toLocaleString() + ' kcal'],
+        ['Days', String(totals.days)],
+        ['Sessions', String(totals.sessions)]
+    ].map(([label, value]) => '<div><span class="metric-label">' + label + '</span><span class="stats-value">' + esc(value) + '</span></div>').join('');
+    if (statsRange === 'total') {
+        chart.hidden = true;
+        chart.innerHTML = '';
+    } else {
+        chart.hidden = false;
+        const buckets = statsBuckets(statsRange, selectedDate, grouped);
+        const scale = Math.max(0.01, ...buckets.map((bucket) => Math.max(bucket.miles, bucket.goal || 0)));
+        chart.innerHTML = '<div class="chart-plot">' + buckets.map((bucket) => {
+            const height = bucket.miles <= 0 ? 0 : Math.max(4, Math.round((bucket.miles / scale) * 108));
+            const level = bucket.level ? ' is-' + bucket.level : '';
+            const tip = bucket.miles.toFixed(1) + ' mi';
+            return '<button type="button" class="chart-col' + (bucket.selected ? ' is-selected' : '') + '" data-bucket="' + dateKey(bucket.date) + '">' +
+                '<span class="chart-track"><span class="chart-tip' + level + '">' + tip + '</span>' +
+                '<span class="chart-bar' + level + '" style="height:' + height + 'px"></span></span>' +
+                '<span class="chart-label">' + esc(bucket.label) + '</span></button>';
+        }).join('') + '</div>';
+    }
+}
+function onStatsClick(event) {
+    const button = event.target.closest('[data-range], [data-stats], [data-bucket], [data-day]');
+    if (!button) return;
+    if (button.dataset.range) {
+        statsRange = button.dataset.range;
+    } else if (button.dataset.stats === 'prev' || button.dataset.stats === 'next') {
+        if (statsRange === 'total') {
+            renderHistory();
+            return;
+        }
+        const dir = button.dataset.stats === 'prev' ? -1 : 1;
+        if (statsRange === 'week') selectedDate = addDays(selectedDate, dir * 7);
+        else if (statsRange === 'year') selectedDate = clampDay(selectedDate.getFullYear() + dir, selectedDate.getMonth(), selectedDate.getDate());
+        else selectedDate = addMonths(selectedDate, dir);
+    } else if (button.dataset.day === 'prev' || button.dataset.day === 'next') {
+        selectedDate = addDays(selectedDate, button.dataset.day === 'prev' ? -1 : 1);
+    } else if (button.dataset.bucket) {
+        selectedDate = parseDateKey(button.dataset.bucket);
+    }
+    renderHistory();
+}
+function showStatsMonth(key) {
+    const date = parseDateKey(key);
+    if (!date || isNaN(date.getTime())) return;
+    selectedDate = startOfDay(date);
+    statsRange = 'month';
+    renderHistory();
+}
+window.showStatsMonth = showStatsMonth;
 
 // --- Send Data Logic (replaces sendCommand) ---
 let pendingData = null;
@@ -292,17 +788,12 @@ function createWebBluetoothTransport() {
             return !!writeChar;
         },
         async connect() {
-            console.log("Requesting Bluetooth device...");
             device = await navigator.bluetooth.requestDevice({
                 filters: [{ services: [SERVICE_UUID] }],
                 services: [SERVICE_UUID]
             });
-            console.log("Device selected:", device);
             device.addEventListener('gattserverdisconnected', () => onDisconnected());
             const server = await device.gatt.connect();
-            console.log("GATT server connected:", server);
-            let services = await server.getPrimaryServices();
-            console.log("Primary services:", services.map(s => s.uuid));
             notifyChar = await server.getPrimaryService(SERVICE_UUID).then(
                 service => service.getCharacteristic(NOTIFY_CHAR_UUID)
             ).catch(async () => {
@@ -315,7 +806,6 @@ function createWebBluetoothTransport() {
                 }
                 throw new Error("Notify characteristic not found");
             });
-            console.log("Notify characteristic:", notifyChar);
             writeChar = await server.getPrimaryService(SERVICE_UUID).then(
                 service => service.getCharacteristic(WRITE_CHAR_UUID)
             ).catch(async () => {
@@ -328,7 +818,6 @@ function createWebBluetoothTransport() {
                 }
                 throw new Error("Write characteristic not found");
             });
-            console.log("Write characteristic:", writeChar);
             await notifyChar.startNotifications();
             notifyChar.addEventListener('characteristicvaluechanged', (event) => {
                 onNotification(event.target.value);
@@ -407,17 +896,12 @@ function disconnectBluetooth() {
 }
 
 function onDisconnected() {
+    suspendWalk();
     connected = false;
     setStatus('Disconnected');
     connectBtn.textContent = "Connect";
     updateRunningState(3);
-    if (sessionActive && sessionStartData) {
-        finishSession('Disconnected');
-    }
 }
-
-const PACKET_CAPTURE_KEY = 'treadmill_packet_capture';
-let captureFrozen = false;
 
 function packetHex(bytes) {
     const out = [];
@@ -427,19 +911,6 @@ function packetHex(bytes) {
         out.push(b.toString(16).padStart(2, '0'));
     }
     return out.join(' ');
-}
-
-function dataViewFromHex(hex) {
-    const bytes = hex.trim().split(/\s+/).map(h => parseInt(h, 16));
-    return new DataView(new Uint8Array(bytes).buffer);
-}
-
-function loadPacketCapture() {
-    try {
-        return JSON.parse(localStorage.getItem(PACKET_CAPTURE_KEY)) || {};
-    } catch {
-        return {};
-    }
 }
 
 function decodeStatusPacket(value) {
@@ -478,59 +949,7 @@ function decodeStatusPacket(value) {
     };
 }
 
-function renderPacketCapture() {
-    const decodedEl = document.getElementById('captureDecoded');
-    const statusEl = document.getElementById('captureStatusHex');
-    const startEl = document.getElementById('captureStartHex');
-    if (!decodedEl || !statusEl || !startEl) return;
-    const capture = loadPacketCapture();
-    if (!capture.statusHex) {
-        decodedEl.textContent = 'No status packet saved yet. Start the belt from this page, then stop and open History.';
-    } else {
-        const parsed = decodeStatusPacket(dataViewFromHex(capture.statusHex));
-        decodedEl.textContent = [
-            'Speed ' + toMiles(parsed.current_speed / 1000, parsed.speed_unit).toFixed(2) + ' mph',
-            'Distance ' + toMiles(parsed.distance / 1000, parsed.distance_unit).toFixed(2) + ' mi',
-            'Steps ' + parsed.steps,
-            'Time ' + formatDuration(Math.round(parsed.duration / 1000))
-        ].join(' · ');
-    }
-    statusEl.textContent = capture.statusHex ? ('Status ' + capture.statusHex) : '';
-    startEl.textContent = capture.startHex ? ('Start ' + capture.startHex) : 'No start command saved yet.';
-}
-
-function savePacketCapture(capture) {
-    localStorage.setItem(PACKET_CAPTURE_KEY, JSON.stringify(capture));
-    renderPacketCapture();
-}
-
-function noteStatusPacket(value) {
-    if (captureFrozen) return;
-    const capture = loadPacketCapture();
-    if (!capture.startHex) return;
-    capture.statusHex = packetHex(value);
-    savePacketCapture(capture);
-}
-
-function noteStartCommand(packet) {
-    if (!packet || packet.length !== 23 || packet[0] !== 0x6A || packet[8] !== 1 || packet[12] !== 4 || packet[22] !== 0x43) return;
-    captureFrozen = false;
-    savePacketCapture({ startHex: packetHex(packet) });
-}
-
-function freezePacketCapture() {
-    captureFrozen = true;
-}
-
 function handleNotification(value) {
-    // Logging for debugging
-    console.log("Received notification, byteLength:", value.byteLength);
-    let hexStr = [];
-    for (let i = 0; i < value.byteLength; ++i) {
-        hexStr.push(value.getUint8(i).toString(16).padStart(2, "0"));
-    }
-    console.log("Payload (hex):", hexStr.join(" "));
-    // Parse treadmill data from value (see treadmill_data.py for structure)
     if (value.byteLength < 31) {
         treadmillData = {
             speed: "-",
@@ -542,10 +961,6 @@ function handleNotification(value) {
         };
         updateDashboard(treadmillData);
         updateRunningState(3);
-        // If session was active, save it as ended due to disconnect/invalid
-        if (sessionActive && sessionStartData) {
-            finishSession('Disconnected');
-        }
         return;
     }
     const parsed = decodeStatusPacket(value);
@@ -566,61 +981,24 @@ function handleNotification(value) {
         status: parsed.status,
         _raw: { current_speed, distance, calories, steps, duration, speed_unit }
     };
-    // Log parsed fields
-    console.log("Parsed treadmill data:", treadmillData);
     updateDashboard(treadmillData);
     updateRunningState(running_state);
+    trackWalk({
+        running_state,
+        steps,
+        calories,
+        distance,
+        durationMs: duration,
+        current_speed,
+        speed_unit,
+        distance_unit
+    });
 
-    // --- Session tracking logic ---
-    if (running_state === 1 && !sessionActive) {
-        noteStatusPacket(value);
-        // Session started
-        sessionActive = true;
-        sessionStartData = {
-            date: Date.now(),
-            steps: steps,
-            calories: calories,
-            distance: distance,
-            duration: Math.round(duration / 1000),
-            speedSum: current_speed,
-            speedCount: 1,
-            speedUnit: speed_unit,
-            distanceUnit: distance_unit
-        };
-        upsertLiveSession(currentSessionRecord());
-    } else if (running_state === 1 && sessionActive && sessionStartData) {
-        noteStatusPacket(value);
-        // Update session stats
-        sessionStartData.steps = steps;
-        sessionStartData.calories = calories;
-        sessionStartData.distance = distance;
-        sessionStartData.duration = Math.round(duration / 1000);
-        sessionStartData.speedSum += current_speed;
-        sessionStartData.speedCount += 1;
-        sessionStartData.distanceUnit = distance_unit;
-        upsertLiveSession(currentSessionRecord());
-    } else if ((running_state === 3 || running_state === 2) && sessionActive && sessionStartData) {
-        noteStatusPacket(value);
-        sessionStartData.steps = steps;
-        sessionStartData.calories = calories;
-        sessionStartData.distance = distance;
-        sessionStartData.duration = Math.round(duration / 1000);
-        sessionStartData.distanceUnit = distance_unit;
-        upsertLiveSession(currentSessionRecord());
-        freezePacketCapture();
-        // Session ended (Stopped or Paused)
-        finishSession(running_state === 3 ? 'Stopped' : 'Paused');
-    }
-
-    // --- Heartbeat/data send logic, like _notification_handler ---
     const link = beltTransport();
     if (link.canWrite()) {
         if (pendingData) {
             const packet = pendingData;
-            console.log("Sending pending data packet:", Array.from(packet).map(b => b.toString(16).padStart(2, "0")).join(" "));
             link.write(packet).then(() => {
-                console.log("Pending data sent.");
-                noteStartCommand(packet);
                 pendingData = null;
             }).catch(err => {
                 console.error("Failed to send pending data:", err);
@@ -628,7 +1006,6 @@ function handleNotification(value) {
         } else {
             // Heartbeat packet: 6a05fdf843
             const heartbeat = new Uint8Array([0x6a, 0x05, 0xfd, 0xf8, 0x43]);
-            console.log("Sending heartbeat packet:", Array.from(heartbeat).map(b => b.toString(16).padStart(2, "0")).join(" "));
             link.write(heartbeat).catch(err => {
                 console.error("Failed to send heartbeat:", err);
             });
@@ -640,7 +1017,6 @@ async function sendCommand(packet) {
     const link = beltTransport();
     if (!link.canWrite()) return;
     try {
-        console.log("Sending command packet:", Array.from(packet).map(b => b.toString(16).padStart(2, "0")).join(" "));
         await link.write(packet);
     } catch (err) {
         console.error("Failed to send command:", err);
@@ -723,17 +1099,14 @@ function showAndroidScanResult(name, address) {
 }
 function onAndroidConnected() {
     connected = true;
-    androidListenOnly = false;
     connectBtn.textContent = "Disconnect";
     updateRunningState(3);
 }
 function onAndroidDisconnected() {
-    const hadSession = sessionActive && sessionStartData;
+    suspendWalk();
     connected = false;
-    androidListenOnly = false;
     connectBtn.textContent = "Connect";
     updateRunningState(3);
-    if (hadSession) finishSession('Disconnected');
 }
 function onAndroidNotification(bytes) {
     const data = new Uint8Array(bytes);
@@ -895,103 +1268,76 @@ window.applyWidgetAction = function (action) {
 updateDashboard({});
 updateRunningState(3);
 setSliderMph(parseFloat(speedSlider.value));
-renderSessionTable();
-renderPacketCapture();
-
-function saveCurrentSession(session) {
-    localStorage.setItem('treadmill_current_session', JSON.stringify(session));
-}
-function loadCurrentSession() {
-    try {
-        return JSON.parse(localStorage.getItem('treadmill_current_session')) || null;
-    } catch { return null; }
-}
-function clearCurrentSession() {
-    localStorage.removeItem('treadmill_current_session');
-}
-
-function currentSessionRecord() {
-    const rawAvg = (sessionStartData.speedSum / sessionStartData.speedCount) / 1000;
-    return {
-        date: sessionStartData.date,
-        duration: sessionStartData.duration,
-        steps: sessionStartData.steps,
-        calories: sessionStartData.calories + ' kcal',
-        avgSpeed: toMiles(rawAvg, sessionStartData.speedUnit),
-        speedUnit: 'mph',
-        distance: toMiles(sessionStartData.distance / 1000, sessionStartData.distanceUnit),
-        distanceUnit: 'mi'
-    };
-}
-function upsertLiveSession(session) {
-    let sessions = loadSessions();
-    if (sessions.length > 0 && sessions[0] && sessions[0].date === session.date) {
-        sessions[0] = session;
-    } else {
-        sessions.unshift(session);
-    }
-    saveSessions(sessions);
-    renderSessionTable();
-}
-
-function finishSession(reason) {
-    sessionActive = false;
-    sessionStartData = null;
-    // No need to do anything else, as the session is already up-to-date in treadmill_sessions
-}
-
-// On page load, check for an unfinished session and restore it if present
-const restored = loadCurrentSession();
-if (restored && !sessionActive) {
+const restoredWalk = loadCurrentSession();
+if (restoredWalk && restoredWalk.date && Date.now() - (restoredWalk.updatedAt || restoredWalk.date) < 3 * 60 * 1000) {
     sessionActive = true;
-    sessionStartData = restored;
+    sessionLive = false;
+    sessionStartData = restoredWalk;
 }
-
-// --- Import/Export History ---
-if (exportHistoryBtn) {
-    exportHistoryBtn.addEventListener('click', () => {
-        const sessions = loadSessions();
-        const blob = new Blob([JSON.stringify(sessions, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'treadmill_sessions.json';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        }, 100);
-        showToast('History exported.');
+const statsEl = document.getElementById('stats');
+if (statsEl) statsEl.addEventListener('click', onStatsClick);
+const dayMilesEl = document.getElementById('dayMilesInput');
+const dayDateEl = document.getElementById('dayDateInput');
+if (dayDateEl) {
+    dayDateEl.addEventListener('change', () => {
+        const date = parseDateKey(dayDateEl.value);
+        if (!date || isNaN(date.getTime())) {
+            renderHistory();
+            return;
+        }
+        selectedDate = startOfDay(date);
+        renderHistory();
     });
 }
-
-if (importHistoryBtn && importHistoryInput) {
-    importHistoryBtn.addEventListener('click', () => {
-        importHistoryInput.value = '';
-        importHistoryInput.click();
-    });
-    importHistoryInput.addEventListener('change', (e) => {
-        const file = importHistoryInput.files && importHistoryInput.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = function(event) {
-            try {
-                const imported = JSON.parse(event.target.result);
-                if (Array.isArray(imported)) {
-                    saveSessions(imported);
-                    renderSessionTable();
-                    showToast('History imported successfully.');
-                } else {
-                    showToast('Invalid file format.');
-                }
-            } catch (err) {
-                showToast('Failed to import: ' + err);
+if (dayMilesEl) {
+    dayMilesEl.addEventListener('change', () => {
+        const key = dateKey(selectedDate);
+        const raw = dayMilesEl.value.trim();
+        if (raw === '') {
+            setDayMiles(key, null);
+        } else {
+            const value = Math.round(parseFloat(raw) * 100) / 100;
+            if (!isFinite(value) || value < 0) {
+                renderHistory();
+                return;
             }
-        };
-        reader.readAsText(file);
+            setDayMiles(key, value);
+        }
+        renderHistory();
     });
 }
+const weightInputEl = document.getElementById('weightInput');
+if (weightInputEl) {
+    weightInputEl.addEventListener('change', () => {
+        const value = Math.round(parseFloat(weightInputEl.value));
+        if (!isFinite(value) || value <= 0) {
+            weightInputEl.value = String(loadWeightLb());
+            return;
+        }
+        localStorage.setItem('treadmill_weight_lb', String(value));
+        renderHistory();
+    });
+}
+const goalInputEl = document.getElementById('goalInput');
+if (goalInputEl) {
+    goalInputEl.addEventListener('change', () => {
+        const value = Math.round(parseFloat(goalInputEl.value) * 10) / 10;
+        if (!isFinite(value) || value <= 0) {
+            goalInputEl.value = loadDailyGoal().toFixed(1);
+            return;
+        }
+        localStorage.setItem('treadmill_daily_goal_mi', String(value));
+        renderHistory();
+    });
+}
+renderHistory();
+importMonthHistory().then(() => renderHistory());
+window.addEventListener('pagehide', () => {
+    if (sessionActive && sessionStartData) {
+        saveCurrentSession(sessionStartData);
+        commitWalk(true);
+    }
+});
 
 function showToast(message, timeout = 4000) {
     if (snackbar && snackbar.MaterialSnackbar) {

@@ -60,6 +60,7 @@ public class MainActivity extends Activity {
     private boolean pageReady;
     private String pendingConnectAddress;
     private String pendingWidgetAction;
+    private String pendingStatsMonth;
     private boolean autoConnectScan;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private static MainActivity instance;
@@ -199,11 +200,13 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 pageReady = true;
                 deliverWidgetAction();
+                deliverStatsMonth();
             }
         });
         webView.addJavascriptInterface(new AndroidBridge(), "PitPatAndroid");
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
         noteWidgetIntent(getIntent());
+        noteStatsIntent(getIntent());
         if (shouldStayInBackground(getIntent())) {
             moveTaskToBack(true);
         }
@@ -214,10 +217,12 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         noteWidgetIntent(intent);
+        noteStatsIntent(intent);
         if (shouldStayInBackground(intent)) {
             moveTaskToBack(true);
         } else {
             deliverWidgetAction();
+            deliverStatsMonth();
         }
     }
 
@@ -229,6 +234,7 @@ public class MainActivity extends Activity {
             moveTaskToBack(true);
         }
         deliverWidgetAction();
+        deliverStatsMonth();
     }
 
     @Override
@@ -256,6 +262,19 @@ public class MainActivity extends Activity {
         String action = pendingWidgetAction;
         pendingWidgetAction = null;
         webView.evaluateJavascript("window.applyWidgetAction(" + JSONObject.quote(action) + ")", null);
+    }
+
+    private void noteStatsIntent(Intent intent) {
+        if (intent == null || !intent.hasExtra(PitPatStatsWidgetProvider.EXTRA_MONTH)) return;
+        pendingStatsMonth = intent.getStringExtra(PitPatStatsWidgetProvider.EXTRA_MONTH);
+        intent.removeExtra(PitPatStatsWidgetProvider.EXTRA_MONTH);
+    }
+
+    private void deliverStatsMonth() {
+        if (!pageReady || webView == null || pendingStatsMonth == null || pendingStatsMonth.isEmpty()) return;
+        String month = pendingStatsMonth;
+        pendingStatsMonth = null;
+        webView.evaluateJavascript("window.showStatsMonth(" + JSONObject.quote(month) + ")", null);
     }
 
     @Override
@@ -535,8 +554,13 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
-        public void setWidgetState(boolean connected, boolean running, String status, String speed, String time, String calories, String distance, String preset) {
-            handler.post(() -> PitPatWidgetProvider.publish(MainActivity.this, connected, running, status, speed, time, calories, distance, preset));
+        public void setWidgetState(boolean connected, boolean running, String status, String speed, String time, String calories, String distance, String preset, int goal) {
+            handler.post(() -> PitPatWidgetProvider.publish(MainActivity.this, connected, running, status, speed, time, calories, distance, preset, goal));
+        }
+
+        @JavascriptInterface
+        public void setStatsSnapshot(String json) {
+            handler.post(() -> PitPatStatsWidgetProvider.saveSnapshot(MainActivity.this, json));
         }
 
         @JavascriptInterface

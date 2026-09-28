@@ -31,6 +31,7 @@ val webAssets = layout.buildDirectory.dir("generated/webassets")
 tasks.register<Copy>("copyWebAssets") {
     from(rootProject.layout.projectDirectory.file("../index.html"))
     from(rootProject.layout.projectDirectory.file("../treadmill.js"))
+    from(rootProject.layout.projectDirectory.file("../pitpat-import/sessions.json"))
     into(webAssets)
 }
 

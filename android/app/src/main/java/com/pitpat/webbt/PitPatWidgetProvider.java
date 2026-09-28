@@ -7,8 +7,10 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.widget.RemoteViews;
 
 public class PitPatWidgetProvider extends AppWidgetProvider {
@@ -27,6 +29,7 @@ public class PitPatWidgetProvider extends AppWidgetProvider {
     private static final String KEY_CALORIES = "calories";
     private static final String KEY_DISTANCE = "distance";
     private static final String KEY_PRESET = "preset";
+    private static final String KEY_GOAL = "goal";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -51,11 +54,12 @@ public class PitPatWidgetProvider extends AppWidgetProvider {
     }
 
     static void publish(Context context, boolean connected, boolean running, String status) {
-        publish(context, connected, running, status, "-", "-", "-", "-", "");
+        int goal = prefs(context).getInt(KEY_GOAL, 0);
+        publish(context, connected, running, status, "-", "-", "-", "-", "", goal);
     }
 
     static void publish(Context context, boolean connected, boolean running, String status,
-            String speed, String time, String calories, String distance, String preset) {
+            String speed, String time, String calories, String distance, String preset, int goal) {
         prefs(context).edit()
                 .putBoolean(KEY_CONNECTED, connected)
                 .putBoolean(KEY_RUNNING, running)
@@ -65,6 +69,7 @@ public class PitPatWidgetProvider extends AppWidgetProvider {
                 .putString(KEY_CALORIES, blank(calories))
                 .putString(KEY_DISTANCE, blank(distance))
                 .putString(KEY_PRESET, preset == null ? "" : preset)
+                .putInt(KEY_GOAL, Math.max(0, Math.min(1000, goal)))
                 .apply();
         refresh(context);
     }
@@ -95,9 +100,18 @@ public class PitPatWidgetProvider extends AppWidgetProvider {
         String calories = prefs.getString(KEY_CALORIES, "-");
         String distance = prefs.getString(KEY_DISTANCE, "-");
         String preset = prefs.getString(KEY_PRESET, "");
+        int goal = prefs.getInt(KEY_GOAL, 0);
 
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_controls);
         views.setTextViewText(R.id.widgetSpeed, speed);
+        views.setProgressBar(R.id.widgetGoal, 1000, goal, false);
+        if (Build.VERSION.SDK_INT >= 31) {
+            try {
+                int color = goal >= 1000 ? 0xFF3DDC84 : goal >= 500 ? 0xFFF5C451 : 0xFF3DD6C6;
+                views.setColorStateList(R.id.widgetGoal, "setProgressTintList", ColorStateList.valueOf(color));
+            } catch (RuntimeException ignored) {
+            }
+        }
         views.setTextViewText(R.id.widgetTime, time);
         views.setTextViewText(R.id.widgetCalories, calories);
         views.setTextViewText(R.id.widgetDistance, distance);

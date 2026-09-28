@@ -6,4 +6,6 @@
     <string name="widget_connect">Connect</string>
     <string name="widget_start">Start</string>
     <string name="widget_disconnected">Disconnected</string>
+    <string name="stats_widget_name">PitPat Stats</string>
+    <string name="stats_widget_description">This week, with each day and progress toward the week goal.</string>
 </resources>
