@@ -85,10 +85,6 @@ function renderSessionTable() {
 window.deleteSessionFromTable = deleteSession;
 
 // --- State ---
-let device = null;
-let server = null;
-let notifyChar = null;
-let writeChar = null;
 let treadmillData = {};
 let connected = false;
 let runningState = 3; // 0: Starting, 1: Running, 2: Paused, 3: Stopped
@@ -195,52 +191,90 @@ function send_data(packet) {
     pendingData = packet;
 }
 
+// --- Transport ---
+// Chrome uses Web Bluetooth. A later Android build can replace this object.
+function createWebBluetoothTransport() {
+    let device = null;
+    let notifyChar = null;
+    let writeChar = null;
+    let onNotification = function () {};
+    let onDisconnected = function () {};
+
+    return {
+        setHandlers(handlers) {
+            onNotification = handlers.onNotification;
+            onDisconnected = handlers.onDisconnected;
+        },
+        canWrite() {
+            return !!writeChar;
+        },
+        async connect() {
+            console.log("Requesting Bluetooth device...");
+            device = await navigator.bluetooth.requestDevice({
+                filters: [{ services: [SERVICE_UUID] }],
+                services: [SERVICE_UUID]
+            });
+            console.log("Device selected:", device);
+            device.addEventListener('gattserverdisconnected', () => onDisconnected());
+            const server = await device.gatt.connect();
+            console.log("GATT server connected:", server);
+            let services = await server.getPrimaryServices();
+            console.log("Primary services:", services.map(s => s.uuid));
+            notifyChar = await server.getPrimaryService(SERVICE_UUID).then(
+                service => service.getCharacteristic(NOTIFY_CHAR_UUID)
+            ).catch(async () => {
+                let services = await server.getPrimaryServices();
+                for (let s of services) {
+                    try {
+                        let c = await s.getCharacteristic(NOTIFY_CHAR_UUID);
+                        if (c) return c;
+                    } catch {}
+                }
+                throw new Error("Notify characteristic not found");
+            });
+            console.log("Notify characteristic:", notifyChar);
+            writeChar = await server.getPrimaryService(SERVICE_UUID).then(
+                service => service.getCharacteristic(WRITE_CHAR_UUID)
+            ).catch(async () => {
+                let services = await server.getPrimaryServices();
+                for (let s of services) {
+                    try {
+                        let c = await s.getCharacteristic(WRITE_CHAR_UUID);
+                        if (c) return c;
+                    } catch {}
+                }
+                throw new Error("Write characteristic not found");
+            });
+            console.log("Write characteristic:", writeChar);
+            await notifyChar.startNotifications();
+            notifyChar.addEventListener('characteristicvaluechanged', (event) => {
+                onNotification(event.target.value);
+            });
+        },
+        disconnect() {
+            if (device && device.gatt.connected) {
+                device.gatt.disconnect();
+            }
+        },
+        write(packet) {
+            return writeChar.writeValue(packet);
+        }
+    };
+}
+
+const transport = createWebBluetoothTransport();
+
 // --- Bluetooth Logic ---
 async function connectBluetooth() {
     setStatus('Connecting');
     if (loadingOverlay) loadingOverlay.style.display = 'flex';
     try {
-        console.log("Requesting Bluetooth device...");
-        device = await navigator.bluetooth.requestDevice({
-            filters: [{ services: [SERVICE_UUID] }],
-            services: [SERVICE_UUID]
+        transport.setHandlers({
+            onNotification: handleNotification,
+            onDisconnected: onDisconnected
         });
-        console.log("Device selected:", device);
         setStatus('Connecting');
-        device.addEventListener('gattserverdisconnected', onDisconnected);
-        server = await device.gatt.connect();
-        console.log("GATT server connected:", server);
-        let services = await server.getPrimaryServices();
-        console.log("Primary services:", services.map(s => s.uuid));
-        notifyChar = await server.getPrimaryService(SERVICE_UUID).then(
-            service => service.getCharacteristic(NOTIFY_CHAR_UUID)
-        ).catch(async () => {
-            // fallback: try to find the service by iterating
-            let services = await server.getPrimaryServices();
-            for (let s of services) {
-                try {
-                    let c = await s.getCharacteristic(NOTIFY_CHAR_UUID);
-                    if (c) return c;
-                } catch {}
-            }
-            throw new Error("Notify characteristic not found");
-        });
-        console.log("Notify characteristic:", notifyChar);
-        writeChar = await server.getPrimaryService(SERVICE_UUID).then(
-            service => service.getCharacteristic(WRITE_CHAR_UUID)
-        ).catch(async () => {
-            let services = await server.getPrimaryServices();
-            for (let s of services) {
-                try {
-                    let c = await s.getCharacteristic(WRITE_CHAR_UUID);
-                    if (c) return c;
-                } catch {}
-            }
-            throw new Error("Write characteristic not found");
-        });
-        console.log("Write characteristic:", writeChar);
-        await notifyChar.startNotifications();
-        notifyChar.addEventListener('characteristicvaluechanged', handleNotification);
+        await transport.connect();
         connected = true;
         setStatus('Stopped');
         connectBtn.textContent = "Disconnect";
@@ -259,9 +293,7 @@ async function connectBluetooth() {
 }
 
 function disconnectBluetooth() {
-    if (device && device.gatt.connected) {
-        device.gatt.disconnect();
-    }
+    transport.disconnect();
     if (loadingOverlay) loadingOverlay.style.display = 'none';
     setStatus('Disconnected');
 }
@@ -276,8 +308,113 @@ function onDisconnected() {
     }
 }
 
-function handleNotification(event) {
-    const value = event.target.value;
+const PACKET_CAPTURE_KEY = 'treadmill_packet_capture';
+let captureFrozen = false;
+
+function packetHex(bytes) {
+    const out = [];
+    const len = typeof bytes.getUint8 === 'function' ? bytes.byteLength : bytes.length;
+    for (let i = 0; i < len; i++) {
+        const b = typeof bytes.getUint8 === 'function' ? bytes.getUint8(i) : bytes[i];
+        out.push(b.toString(16).padStart(2, '0'));
+    }
+    return out.join(' ');
+}
+
+function dataViewFromHex(hex) {
+    const bytes = hex.trim().split(/\s+/).map(h => parseInt(h, 16));
+    return new DataView(new Uint8Array(bytes).buffer);
+}
+
+function loadPacketCapture() {
+    try {
+        return JSON.parse(localStorage.getItem(PACKET_CAPTURE_KEY)) || {};
+    } catch {
+        return {};
+    }
+}
+
+function decodeStatusPacket(value) {
+    function u16(offset) {
+        return (value.getUint8(offset) << 8) | value.getUint8(offset + 1);
+    }
+    function u32(offset) {
+        return (value.getUint8(offset) << 24) | (value.getUint8(offset + 1) << 16) | (value.getUint8(offset + 2) << 8) | value.getUint8(offset + 3);
+    }
+    const current_speed = u16(3);
+    const distance = u32(7);
+    const calories = (value.getUint8(18) << 8) | value.getUint8(19);
+    const steps = u32(14);
+    const duration = u32(20);
+    const flags = value.getUint8(26);
+    const unit_mode = (flags & 128) === 128 ? 1 : 0;
+    const running_state_bits = flags & 24;
+    let running_state = 3;
+    if (running_state_bits === 24) running_state = 0;
+    else if (running_state_bits === 8) running_state = 1;
+    else if (running_state_bits === 16) running_state = 2;
+    else running_state = 3;
+    const statusArr = ["Starting", "Running", "Paused", "Stopped"];
+    const speed_unit = unit_mode === 1 ? "mph" : "kph";
+    const distance_unit = unit_mode === 1 ? "mi" : "km";
+    return {
+        current_speed,
+        distance,
+        calories,
+        steps,
+        duration,
+        running_state,
+        speed_unit,
+        distance_unit,
+        status: statusArr[running_state] || "Unknown"
+    };
+}
+
+function renderPacketCapture() {
+    const decodedEl = document.getElementById('captureDecoded');
+    const statusEl = document.getElementById('captureStatusHex');
+    const startEl = document.getElementById('captureStartHex');
+    if (!decodedEl || !statusEl || !startEl) return;
+    const capture = loadPacketCapture();
+    if (!capture.statusHex) {
+        decodedEl.textContent = 'No status packet saved yet. Start the belt from this page, then stop and open History.';
+    } else {
+        const parsed = decodeStatusPacket(dataViewFromHex(capture.statusHex));
+        decodedEl.textContent = [
+            'Speed ' + (parsed.current_speed / 1000).toFixed(2) + ' ' + parsed.speed_unit,
+            'Distance ' + (parsed.distance / 1000).toFixed(2) + ' ' + parsed.distance_unit,
+            'Steps ' + parsed.steps,
+            'Time ' + formatDuration(Math.round(parsed.duration / 1000))
+        ].join(' · ');
+    }
+    statusEl.textContent = capture.statusHex ? ('Status ' + capture.statusHex) : '';
+    startEl.textContent = capture.startHex ? ('Start ' + capture.startHex) : 'No start command saved yet.';
+}
+
+function savePacketCapture(capture) {
+    localStorage.setItem(PACKET_CAPTURE_KEY, JSON.stringify(capture));
+    renderPacketCapture();
+}
+
+function noteStatusPacket(value) {
+    if (captureFrozen) return;
+    const capture = loadPacketCapture();
+    if (!capture.startHex) return;
+    capture.statusHex = packetHex(value);
+    savePacketCapture(capture);
+}
+
+function noteStartCommand(packet) {
+    if (!packet || packet.length !== 23 || packet[0] !== 0x6A || packet[8] !== 1 || packet[12] !== 4 || packet[22] !== 0x43) return;
+    captureFrozen = false;
+    savePacketCapture({ startHex: packetHex(packet) });
+}
+
+function freezePacketCapture() {
+    captureFrozen = true;
+}
+
+function handleNotification(value) {
     // Logging for debugging
     console.log("Received notification, byteLength:", value.byteLength);
     let hexStr = [];
@@ -303,37 +440,22 @@ function handleNotification(event) {
         }
         return;
     }
-    // Helper to read unsigned int from bytes
-    function u16(offset) {
-        return (value.getUint8(offset) << 8) | value.getUint8(offset + 1);
-    }
-    function u32(offset) {
-        return (value.getUint8(offset) << 24) | (value.getUint8(offset + 1) << 16) | (value.getUint8(offset + 2) << 8) | value.getUint8(offset + 3);
-    }
-    // Parse fields
-    const current_speed = u16(3);
-    const distance = u32(7);
-    const calories = (value.getUint8(18) << 8) | value.getUint8(19);
-    const steps = u32(14);
-    const duration = u32(20);
-    const flags = value.getUint8(26);
-    const unit_mode = (flags & 128) === 128 ? 1 : 0;
-    const running_state_bits = flags & 24;
-    let running_state = 3;
-    if (running_state_bits === 24) running_state = 0;
-    else if (running_state_bits === 8) running_state = 1;
-    else if (running_state_bits === 16) running_state = 2;
-    else running_state = 3;
-    const statusArr = ["Starting", "Running", "Paused", "Stopped"];
-    const speed_unit = unit_mode === 1 ? "mph" : "kph";
-    const distance_unit = unit_mode === 1 ? "mi" : "km";
+    const parsed = decodeStatusPacket(value);
+    const current_speed = parsed.current_speed;
+    const distance = parsed.distance;
+    const calories = parsed.calories;
+    const steps = parsed.steps;
+    const duration = parsed.duration;
+    const running_state = parsed.running_state;
+    const speed_unit = parsed.speed_unit;
+    const distance_unit = parsed.distance_unit;
     treadmillData = {
         speed: (current_speed / 1000).toFixed(2) + " " + speed_unit,
         distance: (distance / 1000).toFixed(2) + " " + distance_unit,
         calories: calories + " kcal",
         steps: steps,
         duration: Math.round(duration / 1000),
-        status: statusArr[running_state] || "Unknown",
+        status: parsed.status,
         _raw: { current_speed, distance, calories, steps, duration, speed_unit }
     };
     // Log parsed fields
@@ -343,6 +465,7 @@ function handleNotification(event) {
 
     // --- Session tracking logic ---
     if (running_state === 1 && !sessionActive) {
+        noteStatusPacket(value);
         // Session started
         sessionActive = true;
         sessionStartData = {
@@ -366,6 +489,7 @@ function handleNotification(event) {
             speedUnit: sessionStartData.speedUnit || ''
         });
     } else if (running_state === 1 && sessionActive && sessionStartData) {
+        noteStatusPacket(value);
         // Update session stats
         sessionStartData.steps = steps;
         sessionStartData.calories = calories;
@@ -384,16 +508,20 @@ function handleNotification(event) {
             speedUnit: sessionStartData.speedUnit || ''
         });
     } else if ((running_state === 3 || running_state === 2) && sessionActive && sessionStartData) {
+        noteStatusPacket(value);
+        freezePacketCapture();
         // Session ended (Stopped or Paused)
         finishSession(running_state === 3 ? 'Stopped' : 'Paused');
     }
 
     // --- Heartbeat/data send logic, like _notification_handler ---
-    if (writeChar) {
+    if (transport.canWrite()) {
         if (pendingData) {
-            console.log("Sending pending data packet:", Array.from(pendingData).map(b => b.toString(16).padStart(2, "0")).join(" "));
-            writeChar.writeValue(pendingData).then(() => {
+            const packet = pendingData;
+            console.log("Sending pending data packet:", Array.from(packet).map(b => b.toString(16).padStart(2, "0")).join(" "));
+            transport.write(packet).then(() => {
                 console.log("Pending data sent.");
+                noteStartCommand(packet);
                 pendingData = null;
             }).catch(err => {
                 console.error("Failed to send pending data:", err);
@@ -402,7 +530,7 @@ function handleNotification(event) {
             // Heartbeat packet: 6a05fdf843
             const heartbeat = new Uint8Array([0x6a, 0x05, 0xfd, 0xf8, 0x43]);
             console.log("Sending heartbeat packet:", Array.from(heartbeat).map(b => b.toString(16).padStart(2, "0")).join(" "));
-            writeChar.writeValue(heartbeat).catch(err => {
+            transport.write(heartbeat).catch(err => {
                 console.error("Failed to send heartbeat:", err);
             });
         }
@@ -410,10 +538,10 @@ function handleNotification(event) {
 }
 
 async function sendCommand(packet) {
-    if (!writeChar) return;
+    if (!transport.canWrite()) return;
     try {
         console.log("Sending command packet:", Array.from(packet).map(b => b.toString(16).padStart(2, "0")).join(" "));
-        await writeChar.writeValue(packet);
+        await transport.write(packet);
     } catch (err) {
         console.error("Failed to send command:", err);
         showToast("Failed to send command: " + err);
@@ -533,6 +661,7 @@ updateDashboard({});
 updateRunningState(3);
 sliderValue.textContent = speedSlider.value;
 renderSessionTable();
+renderPacketCapture();
 
 function saveCurrentSession(session) {
     localStorage.setItem('treadmill_current_session', JSON.stringify(session));
