@@ -133,6 +133,7 @@ function updateRunningState(state) {
     publishWidget();
 }
 function publishWidget(statusOverride, force) {
+    syncPet(false);
     if (!window.PitPatAndroid || !window.PitPatAndroid.setWidgetState) return;
     let status = statusOverride;
     if (!status) {
@@ -160,6 +161,7 @@ function publishWidget(statusOverride, force) {
     }
     const preset = speedSlider ? speedSlider.value : '';
     window.PitPatAndroid.setWidgetState(!!connected, runningState === 1, status, speed, time, calories, distance, preset, goalProgress);
+    publishWalkNotice();
 }
 function periodSnapshot(range, anchor, grouped) {
     const totals = collectRange(range, anchor, grouped);
@@ -194,6 +196,94 @@ function publishStatsSnapshot() {
     publishStatsSnapshot.last = payload;
     window.PitPatAndroid.setStatsSnapshot(payload);
 }
+function syncPet(forceNew) {
+    const quoteEl = document.getElementById('petQuote');
+    const card = document.getElementById('petCard');
+    if (!quoteEl || !card) return;
+    const met = goalWidgetProgress() >= 1000;
+    const pool = met ? PET_CONGRATS : PET_ENCOURAGE;
+    if (forceNew || met !== syncPet.met || !syncPet.text) {
+        let next = pool[Math.floor(Math.random() * pool.length)];
+        if (forceNew && pool.length > 1) {
+            let guard = 0;
+            while (next === syncPet.text && guard < 8) {
+                next = pool[Math.floor(Math.random() * pool.length)];
+                guard += 1;
+            }
+        }
+        syncPet.text = next;
+        syncPet.met = met;
+    }
+    quoteEl.textContent = syncPet.text;
+    card.classList.toggle('is-met', met);
+}
+const PET_CATS = [
+    'cat-1', 'cat-2', 'cat-3', 'cat-4', 'cat-5',
+    'cat-6', 'cat-7', 'cat-8', 'cat-9',
+    'extra-bulba', 'extra-sage'
+];
+function applyPetCat(cat) {
+    const img = document.getElementById('petBulba');
+    if (!img || !cat) return;
+    const next = 'cats/' + cat + '.png';
+    if (img.getAttribute('src') !== next) img.src = next;
+}
+function rollPetCat(forceNew) {
+    if (window.PitPatAndroid && window.PitPatAndroid.rollPetCat) {
+        applyPetCat(window.PitPatAndroid.rollPetCat(!!forceNew));
+        return;
+    }
+    let cat = localStorage.getItem('treadmill_pet_cat') || '';
+    const at = parseInt(localStorage.getItem('treadmill_pet_cat_at') || '0', 10) || 0;
+    if (forceNew || !PET_CATS.includes(cat) || Date.now() - at >= 60 * 60 * 1000) {
+        let next = PET_CATS[Math.floor(Math.random() * PET_CATS.length)];
+        let guard = 0;
+        while (next === cat && guard < 8) {
+            next = PET_CATS[Math.floor(Math.random() * PET_CATS.length)];
+            guard += 1;
+        }
+        cat = next;
+        localStorage.setItem('treadmill_pet_cat', cat);
+        localStorage.setItem('treadmill_pet_cat_at', String(Date.now()));
+    }
+    applyPetCat(cat);
+}
+function shakePetVisual() {
+    const img = document.getElementById('petBulba');
+    if (!img) return;
+    img.classList.remove('is-shaking');
+    void img.offsetWidth;
+    img.classList.add('is-shaking');
+}
+function schedulePetShake() {
+    const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const wait = 10000 + Math.random() * 30000;
+    setTimeout(() => {
+        if (!reduced && document.visibilityState !== 'hidden') shakePetVisual();
+        if (window.PitPatAndroid && window.PitPatAndroid.shakePet) window.PitPatAndroid.shakePet();
+        schedulePetShake();
+    }, wait);
+}
+const PET_ENCOURAGE = [
+    'A little more and today is yours.',
+    'Those miles are still waiting.',
+    'One more walk. You have got this.',
+    'The belt misses you.',
+    'Today is not done yet.',
+    'Small steps still count.',
+    'You are close enough to try.',
+    'Lace up. There is still time.'
+];
+const PET_CONGRATS = [
+    'Goal met. Look at you.',
+    'That is the walk. Well done.',
+    'Today is complete.',
+    'Miles in the bag.',
+    'You showed up. That is the win.',
+    'Goal crushed. Rest those feet.',
+    'Green day. Nice work.',
+    'You did the thing.'
+];
 function widgetClock(seconds) {
     seconds = Math.max(0, Math.floor(seconds) || 0);
     const h = Math.floor(seconds / 3600);
@@ -396,6 +486,7 @@ function finishWalk() {
     if (keep) upsertSession(record);
     else saveSessions(loadSessions().filter((s) => s.date !== record.date));
     renderHistory();
+    publishWalkNotice();
 }
 function suspendWalk() {
     if (!sessionActive || !sessionStartData) return;
@@ -449,9 +540,7 @@ function loadDayMiles() {
         return {};
     }
 }
-function goalWidgetProgress() {
-    const goal = loadDailyGoal();
-    if (!(goal > 0)) return 0;
+function todayWalkMiles() {
     const today = dateKey(new Date());
     const sessions = loadSessions().filter((session) => {
         const when = sessionWhen(session);
@@ -463,8 +552,18 @@ function goalWidgetProgress() {
         if (idx >= 0) sessions[idx] = live;
         else sessions.push(live);
     }
-    const miles = milesForDay(today, sumSessions(sessions).miles);
-    return Math.max(0, Math.min(1000, Math.round((miles / goal) * 1000)));
+    return milesForDay(today, sumSessions(sessions).miles);
+}
+function goalWidgetProgress() {
+    const goal = loadDailyGoal();
+    if (!(goal > 0)) return 0;
+    return Math.max(0, Math.min(1000, Math.round((todayWalkMiles() / goal) * 1000)));
+}
+function publishWalkNotice() {
+    if (!window.PitPatAndroid || !window.PitPatAndroid.setWalkNotice) return;
+    const speed = connected && treadmillData && treadmillData.speed ? treadmillData.speed : '';
+    const miles = todayWalkMiles().toFixed(2) + ' mi today';
+    window.PitPatAndroid.setWalkNotice(!!sessionActive, connected && runningState === 1, connected && runningState === 2, speed, miles);
 }
 function milesForDay(key, recorded) {
     const stored = loadDayMiles()[key];
@@ -1257,6 +1356,14 @@ window.applyWidgetAction = function (action) {
         publishWidget('Connect first', true);
         return;
     }
+    if (action === 'pause') {
+        if (runningState === 1) send_data(makePacket('pause'));
+        return;
+    }
+    if (action === 'resume') {
+        if (runningState === 2) startWalk();
+        return;
+    }
     if (runningState === 1) {
         send_data(makePacket('pause'));
     } else if (runningState !== 0) {
@@ -1269,10 +1376,23 @@ updateDashboard({});
 updateRunningState(3);
 setSliderMph(parseFloat(speedSlider.value));
 const restoredWalk = loadCurrentSession();
-if (restoredWalk && restoredWalk.date && Date.now() - (restoredWalk.updatedAt || restoredWalk.date) < 3 * 60 * 1000) {
+if (restoredWalk && restoredWalk.date && Date.now() - (restoredWalk.updatedAt || restoredWalk.date) < 12 * 60 * 60 * 1000) {
     sessionActive = true;
     sessionLive = false;
     sessionStartData = restoredWalk;
+    publishWalkNotice();
+    if (window.PitPatAndroid && window.PitPatAndroid.connectLast) window.PitPatAndroid.connectLast();
+}
+const petCardEl = document.getElementById('petCard');
+if (petCardEl) {
+    petCardEl.addEventListener('click', () => {
+        shakePetVisual();
+        if (window.PitPatAndroid && window.PitPatAndroid.shakePet) window.PitPatAndroid.shakePet();
+        syncPet(true);
+    });
+    rollPetCat(true);
+    setInterval(() => rollPetCat(false), 60 * 1000);
+    schedulePetShake();
 }
 const statsEl = document.getElementById('stats');
 if (statsEl) statsEl.addEventListener('click', onStatsClick);
@@ -1330,6 +1450,38 @@ if (goalInputEl) {
         renderHistory();
     });
 }
+function mountCatWallpaper() {
+    const host = document.getElementById('catWallpaper');
+    if (!host) return;
+    const icons = [
+        'cats/cat-1.png', 'cats/cat-2.png', 'cats/cat-3.png', 'cats/cat-4.png',
+        'cats/cat-5.png', 'cats/cat-6.png', 'cats/cat-7.png', 'cats/cat-8.png',
+        'cats/cat-9.png', 'cats/extra-bulba.png', 'cats/extra-sage.png'
+    ];
+    let seed = 42;
+    const rand = () => {
+        seed |= 0;
+        seed = (seed + 0x6d2b79f5) | 0;
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    host.innerHTML = Array.from({ length: 48 }, () => {
+        const src = icons[Math.floor(rand() * icons.length)];
+        const top = (rand() * 92).toFixed(2);
+        const size = 36 + Math.floor(rand() * 56);
+        const opacity = (0.1 + rand() * 0.16).toFixed(3);
+        const rotate = (-28 + rand() * 56).toFixed(1);
+        const duration = (18 + rand() * 28).toFixed(1);
+        const delay = (-rand() * 40).toFixed(1);
+        const drift = (8 + rand() * 18).toFixed(1);
+        const name = rand() > 0.5 ? 'cat-drift-right' : 'cat-drift-left';
+        return '<div class="cat-floater" style="top:' + top + '%;width:' + size + 'px;height:' + size + 'px;--cat-drift:' + drift + 'px;animation-name:' + name + ';animation-duration:' + duration + 's;animation-delay:' + delay + 's">' +
+            '<img src="' + src + '" alt="" draggable="false" style="opacity:' + opacity + ';transform:rotate(' + rotate + 'deg)">' +
+            '</div>';
+    }).join('');
+}
+mountCatWallpaper();
 renderHistory();
 importMonthHistory().then(() => renderHistory());
 window.addEventListener('pagehide', () => {

@@ -46,8 +46,10 @@ public class MainActivity extends Activity {
     private static final UUID WRITE_CHARACTERISTIC = UUID.fromString("0000fba1-0000-1000-8000-00805f9b34fb");
     private static final UUID CLIENT_CONFIG = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final int SCAN_REQUEST = 1;
+    private static final int NOTIF_REQUEST = 2;
     private static final int MTU = 185;
     private static final long SCAN_MS = 10000;
+    private static final long[] RECONNECT_DELAYS = {3000, 8000, 15000, 30000};
 
     private WebView webView;
     private BluetoothLeScanner scanner;
@@ -62,7 +64,18 @@ public class MainActivity extends Activity {
     private String pendingWidgetAction;
     private String pendingStatsMonth;
     private boolean autoConnectScan;
+    private boolean userDisconnect;
+    private boolean walkHeld;
+    private boolean connecting;
+    private boolean reconnectGaveUp;
+    private int reconnectAttempt;
+    private String noticeSpeed = "";
+    private String noticeMiles = "0.00 mi today";
+    private boolean noticeRunning;
+    private boolean noticePaused;
+    private boolean askedNotification;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable reconnectTask = this::attemptReconnect;
     private static MainActivity instance;
 
     static boolean runInBackground(String action) {
@@ -106,15 +119,16 @@ public class MainActivity extends Activity {
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+            if (gatt != MainActivity.this.gatt) return;
             if (newState == BluetoothGatt.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 reportStatus("Connecting…");
                 gatt.discoverServices();
                 return;
             }
             if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                connecting = false;
                 closeGatt();
-                runJs("window.onAndroidDisconnected()");
-                reportStatus("Disconnected");
+                onLinkLost();
             }
         }
 
@@ -142,8 +156,14 @@ public class MainActivity extends Activity {
                 reportStatus("Could not listen to the pad");
                 return;
             }
+            connecting = false;
+            reconnectAttempt = 0;
+            reconnectGaveUp = false;
+            userDisconnect = false;
+            handler.removeCallbacks(reconnectTask);
             runJs("window.onAndroidConnected()");
             reportStatus("Connected");
+            refreshWalkNotice();
         }
 
         @Override
@@ -286,8 +306,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (instance == this) instance = null;
+        handler.removeCallbacks(reconnectTask);
         stopScan(false);
         closeGatt();
+        WalkService.stop(this);
         PitPatWidgetProvider.publish(this, false, false, "Disconnected");
         super.onDestroy();
     }
@@ -378,6 +400,7 @@ public class MainActivity extends Activity {
         if (autoConnectScan) {
             autoConnectScan = false;
             reportStatus("Pad not found");
+            if (walkHeld) giveUpReconnect();
             return;
         }
         reportStatus("Scan finished");
@@ -390,6 +413,7 @@ public class MainActivity extends Activity {
         BluetoothAdapter adapter = bluetoothAdapter();
         if (adapter == null || !adapter.isEnabled()) {
             reportStatus("Bluetooth is off");
+            if (walkHeld) giveUpReconnect();
             return;
         }
         BluetoothDevice device;
@@ -399,8 +423,69 @@ public class MainActivity extends Activity {
             reportStatus("That pad address is not valid");
             return;
         }
+        connecting = true;
         reportStatus("Connecting…");
         gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+        refreshWalkNotice();
+    }
+
+    private void onLinkLost() {
+        runJs("window.onAndroidDisconnected()");
+        reportStatus("Disconnected");
+        if (userDisconnect || !walkHeld || reconnectGaveUp) return;
+        if (reconnectAttempt >= RECONNECT_DELAYS.length) {
+            giveUpReconnect();
+            return;
+        }
+        long delay = RECONNECT_DELAYS[reconnectAttempt];
+        reconnectAttempt += 1;
+        handler.removeCallbacks(reconnectTask);
+        handler.postDelayed(reconnectTask, delay);
+        refreshWalkNotice();
+    }
+
+    private void attemptReconnect() {
+        if (!walkHeld || userDisconnect || reconnectGaveUp) return;
+        String address = PitPatWidgetProvider.lastAddress(this);
+        if (address == null || address.isEmpty()) {
+            giveUpReconnect();
+            return;
+        }
+        beginConnect(address);
+    }
+
+    private void giveUpReconnect() {
+        reconnectGaveUp = true;
+        reconnectAttempt = 0;
+        handler.removeCallbacks(reconnectTask);
+        connecting = false;
+        WalkService.stop(this);
+    }
+
+    private void refreshWalkNotice() {
+        if (!walkHeld || userDisconnect || reconnectGaveUp) {
+            WalkService.stop(this);
+            return;
+        }
+        if (gatt == null && !connecting) return;
+        String title;
+        String action = "";
+        if (gatt == null) title = "Reconnecting";
+        else if (noticeRunning) {
+            title = noticeSpeed.isEmpty() ? "Walking" : noticeSpeed;
+            action = "pause";
+        } else if (noticePaused) {
+            title = "Paused";
+            action = "resume";
+        } else title = "Walking";
+        WalkService.show(this, title, noticeMiles, action);
+    }
+
+    private void ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || askedNotification) return;
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        askedNotification = true;
+        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, NOTIF_REQUEST);
     }
 
     @SuppressLint("MissingPermission")
@@ -486,8 +571,12 @@ public class MainActivity extends Activity {
     }
 
     private void disconnectPad() {
+        userDisconnect = true;
+        handler.removeCallbacks(reconnectTask);
         boolean wasConnected = gatt != null;
         closeGatt();
+        connecting = false;
+        WalkService.stop(this);
         if (wasConnected) {
             runJs("window.onAndroidDisconnected()");
             reportStatus("Disconnected");
@@ -534,6 +623,9 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void connect(String address) {
             handler.post(() -> {
+                userDisconnect = false;
+                reconnectGaveUp = false;
+                reconnectAttempt = 0;
                 PitPatWidgetProvider.saveAddress(MainActivity.this, address);
                 ensurePermissionAndConnect(address);
             });
@@ -542,6 +634,9 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void connectLast() {
             handler.post(() -> {
+                userDisconnect = false;
+                reconnectGaveUp = false;
+                reconnectAttempt = 0;
                 String address = PitPatWidgetProvider.lastAddress(MainActivity.this);
                 if (address == null || address.isEmpty()) {
                     autoConnectScan = true;
@@ -554,8 +649,43 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public String rollPetCat(boolean forceNew) {
+            String cat = PitPatPetWidgetProvider.rollCat(MainActivity.this, forceNew);
+            handler.post(() -> PitPatPetWidgetProvider.refresh(MainActivity.this));
+            return cat;
+        }
+
+        @JavascriptInterface
+        public void shakePet() {
+            handler.post(() -> PitPatPetWidgetProvider.shake(MainActivity.this));
+        }
+
+        @JavascriptInterface
+        public void setWalkNotice(boolean held, boolean running, boolean paused, String speed, String miles) {
+            handler.post(() -> {
+                walkHeld = held;
+                noticeRunning = running;
+                noticePaused = paused;
+                noticeSpeed = speed == null ? "" : speed;
+                noticeMiles = miles == null || miles.isEmpty() ? "0.00 mi today" : miles;
+                if (!held) {
+                    userDisconnect = false;
+                    reconnectGaveUp = false;
+                    reconnectAttempt = 0;
+                    handler.removeCallbacks(reconnectTask);
+                } else {
+                    ensureNotificationPermission();
+                }
+                refreshWalkNotice();
+            });
+        }
+
+        @JavascriptInterface
         public void setWidgetState(boolean connected, boolean running, String status, String speed, String time, String calories, String distance, String preset, int goal) {
-            handler.post(() -> PitPatWidgetProvider.publish(MainActivity.this, connected, running, status, speed, time, calories, distance, preset, goal));
+            handler.post(() -> {
+                PitPatWidgetProvider.publish(MainActivity.this, connected, running, status, speed, time, calories, distance, preset, goal);
+                PitPatPetWidgetProvider.refresh(MainActivity.this);
+            });
         }
 
         @JavascriptInterface

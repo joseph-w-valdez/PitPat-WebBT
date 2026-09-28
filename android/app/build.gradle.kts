@@ -32,6 +32,9 @@ tasks.register<Copy>("copyWebAssets") {
     from(rootProject.layout.projectDirectory.file("../index.html"))
     from(rootProject.layout.projectDirectory.file("../treadmill.js"))
     from(rootProject.layout.projectDirectory.file("../pitpat-import/sessions.json"))
+    from(rootProject.layout.projectDirectory.dir("../cats")) {
+        into("cats")
+    }
     into(webAssets)
 }
 

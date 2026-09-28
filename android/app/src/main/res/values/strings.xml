@@ -8,4 +8,9 @@
     <string name="widget_disconnected">Disconnected</string>
     <string name="stats_widget_name">PitPat Stats</string>
     <string name="stats_widget_description">This week, with each day and progress toward the week goal.</string>
+    <string name="pet_widget_name">PitPat Pet</string>
+    <string name="pet_widget_description">A 2 by 2 bulbasaur that cheers your daily goal.</string>
+    <string name="walk_channel">Walk</string>
+    <string name="walk_pause">Pause</string>
+    <string name="walk_resume">Resume</string>
 </resources>

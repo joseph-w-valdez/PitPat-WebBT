@@ -34,6 +34,41 @@
             width: 100vw;
             overflow-x: hidden;
         }
+        .cat-wallpaper {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .cat-floater {
+            position: absolute;
+            left: 0;
+            pointer-events: none;
+            will-change: transform;
+            animation-timing-function: linear;
+            animation-iteration-count: infinite;
+        }
+        .cat-floater img {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            pointer-events: none;
+            user-select: none;
+        }
+        @keyframes cat-drift-right {
+            from { transform: translate3d(-20vw, 0, 0); }
+            to { transform: translate3d(110vw, var(--cat-drift, 12px), 0); }
+        }
+        @keyframes cat-drift-left {
+            from { transform: translate3d(110vw, 0, 0); }
+            to { transform: translate3d(-20vw, var(--cat-drift, 12px), 0); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .cat-floater { animation: none; visibility: hidden; }
+        }
+        .app-bar, .page { position: relative; z-index: 1; }
         .app-bar {
             padding: 1.1rem 1.25rem 0.2rem;
         }
@@ -69,6 +104,7 @@
             grid-template-columns: 1fr 1fr;
             gap: 0.75rem;
             width: 100%;
+            align-items: start;
         }
         .mdl-card {
             margin: 0;
@@ -87,7 +123,73 @@
             justify-content: center;
         }
         .stat-speed {
-            grid-column: 1 / -1;
+            aspect-ratio: 1;
+            width: 100%;
+            position: relative;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+        .stat-speed .mdl-card__title {
+            position: absolute;
+            top: 0.9rem;
+            left: 0.5rem;
+            right: 0.5rem;
+            width: auto;
+            justify-content: center;
+        }
+        .stat-speed .card-title { width: 100%; text-align: center; }
+        .stat-speed .mdl-card__supporting-text { text-align: center; }
+        .stat-speed .card-value {
+            font-size: clamp(2.6rem, 10vw, 4rem) !important;
+            color: var(--accent) !important;
+            line-height: 1 !important;
+            margin-top: 0.85rem;
+            text-align: center;
+            width: 100%;
+        }
+        .pet-card {
+            display: flex;
+            flex-direction: column;
+            aspect-ratio: 1;
+            width: 100%;
+            padding: 0.45rem 0.55rem 0.55rem;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.15rem;
+            cursor: pointer;
+            font: inherit;
+            color: inherit;
+            appearance: none;
+            -webkit-appearance: none;
+        }
+        .pet-quote {
+            display: block;
+            max-width: 100%;
+            margin: 0;
+            padding: 0.28rem 0.45rem;
+            border-radius: 999px;
+            background: #121722;
+            border: 1px solid var(--line);
+            color: var(--text);
+            font-size: 0.72rem;
+            font-weight: 700;
+            line-height: 1.25;
+            text-align: center;
+        }
+        .pet-card.is-met .pet-quote { color: var(--green); }
+        .pet-card img {
+            width: 72%;
+            height: auto;
+            object-fit: contain;
+            pointer-events: none;
+            user-select: none;
+        }
+        .pet-card img.is-shaking { animation: pet-shake 450ms ease-in-out; }
+        @keyframes pet-shake {
+            0%, 100% { transform: rotate(0deg) scale(1); }
+            30% { transform: rotate(-14deg) scale(1.12); }
+            60% { transform: rotate(12deg) scale(1.08); }
         }
         .mdl-card__title {
             justify-content: flex-start;
@@ -113,11 +215,6 @@
             font-weight: 700;
             letter-spacing: -0.03em;
             line-height: 1.1;
-        }
-        .stat-speed .card-value {
-            font-size: clamp(3rem, 8vw, 4.6rem) !important;
-            color: var(--accent) !important;
-            line-height: 1 !important;
         }
         .control-dock {
             display: flex;
@@ -592,7 +689,7 @@
             .app-bar, .page { padding-left: 0.7rem; padding-right: 0.7rem; }
             .control-dock { padding: 0.75rem; }
             .dashboard { gap: 0.55rem; }
-            .stat-speed .card-value { font-size: 2.7rem !important; }
+            .stat-speed .card-value { font-size: clamp(2.1rem, 12vw, 2.8rem) !important; }
             .belt-controls .mdl-button {
                 padding-left: 0.35rem !important;
                 padding-right: 0.35rem !important;
@@ -615,6 +712,7 @@
     </style>
 </head>
 <body>
+    <div id="catWallpaper" class="cat-wallpaper" aria-hidden="true"></div>
     <header class="app-bar">
         <span class="brand">PitPat</span>
     </header>
@@ -625,6 +723,10 @@
                             <div class="mdl-card__title"><span class="card-title">Speed</span></div>
                             <div class="mdl-card__supporting-text card-value" id="speed">-</div>
                         </div>
+                        <button type="button" class="mdl-card pet-card" id="petCard" aria-label="Shake Bulbasaur">
+                            <span class="pet-quote" id="petQuote"></span>
+                            <img id="petBulba" src="cats/extra-bulba.png" alt="">
+                        </button>
                         <div class="mdl-card mdl-shadow--2dp">
                             <div class="mdl-card__title"><span class="card-title">Distance</span></div>
                             <div class="mdl-card__supporting-text card-value" id="distance">-</div>
@@ -640,10 +742,6 @@
                         <div class="mdl-card mdl-shadow--2dp">
                             <div class="mdl-card__title"><span class="card-title">Duration</span></div>
                             <div class="mdl-card__supporting-text card-value" id="duration">-</div>
-                        </div>
-                        <div class="mdl-card mdl-shadow--2dp">
-                            <div class="mdl-card__title"><span class="card-title">Running State</span></div>
-                            <span id="statusChip" class="mdl-chip chip-disconnected" style="vertical-align: middle;"><span class="mdl-chip__text">Disconnected</span></span>
                         </div>
                     </div>
                     <div class="control-dock">
@@ -746,6 +844,6 @@
         <div class="mdl-snackbar__text"></div>
         <button class="mdl-snackbar__action" type="button"></button>
     </div>
-    <script src="treadmill.js?v=21"></script>
+    <script src="treadmill.js?v=25"></script>
 </body>
 </html>

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/petRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background"
+    android:gravity="center_horizontal"
+    android:orientation="vertical"
+    android:padding="8dp">
+
+    <ImageView
+        android:id="@+id/petImage"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:contentDescription="Bulbasaur"
+        android:scaleType="fitCenter"
+        android:src="@drawable/pet_bulba" />
+
+    <TextView
+        android:id="@+id/petQuote"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="3"
+        android:text="One more walk."
+        android:textColor="#F4F7FB"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+</LinearLayout>
