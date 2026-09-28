@@ -1,6 +1,7 @@
 // treadmill.js - JavaScript logic for PitPat Treadmill Control Dashboard
 
 // --- Bluetooth UUIDs ---
+const KM_TO_MI = 0.621371;
 const SERVICE_UUID = "0000fba0-0000-1000-8000-00805f9b34fb";
 const NOTIFY_CHAR_UUID = "0000fba2-0000-1000-8000-00805f9b34fb";
 const WRITE_CHAR_UUID = "0000fba1-0000-1000-8000-00805f9b34fb";
@@ -18,6 +19,7 @@ const stopBtn = document.getElementById('stopBtn');
 const speedUpBtn = document.getElementById('speedUpBtn');
 const speedDownBtn = document.getElementById('speedDownBtn');
 const speedSlider = document.getElementById('speedSlider');
+const presetButtons = Array.from(document.querySelectorAll('.preset-btn'));
 const sliderValue = document.getElementById('sliderValue');
 const statusChip = document.getElementById('statusChip');
 const loadingOverlay = document.getElementById('loadingOverlay');
@@ -61,19 +63,25 @@ function renderSessionTable() {
     historyTableBody.innerHTML = '';
     sessions.forEach((s, i) => {
         let avgSpeedDisplay = '-';
-        if (typeof s.avgSpeed === 'number' && !isNaN(s.avgSpeed)) {
-            avgSpeedDisplay = s.avgSpeed.toFixed(2) + ' ' + (s.speedUnit || '');
-        } else if (typeof s.avgSpeed === 'string' && !isNaN(parseFloat(s.avgSpeed))) {
-            avgSpeedDisplay = parseFloat(s.avgSpeed).toFixed(2) + ' ' + (s.speedUnit || '');
+        const avgNumber = typeof s.avgSpeed === 'number' ? s.avgSpeed : parseFloat(s.avgSpeed);
+        if (!isNaN(avgNumber)) {
+            const mph = s.speedUnit === 'kph' ? avgNumber * KM_TO_MI : avgNumber;
+            avgSpeedDisplay = mph.toFixed(2) + ' mph';
         }
         let dateStr = '-';
         if (typeof s.date === 'number' || typeof s.date === 'string') {
             dateStr = dateFns.formatRelative(new Date(s.date), new Date());
         }
+        let distanceDisplay = '-';
+        const miles = milesFromSession(s);
+        if (miles > 0 || s.distance === 0) {
+            distanceDisplay = miles.toFixed(2) + ' mi';
+        }
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td>${dateStr}</td>
             <td>${formatDuration(s.duration)}</td>
+            <td>${distanceDisplay}</td>
             <td>${s.steps}</td>
             <td>${s.calories}</td>
             <td>${avgSpeedDisplay}</td>
@@ -81,12 +89,47 @@ function renderSessionTable() {
         `;
         historyTableBody.appendChild(tr);
     });
+    renderPeriodTotals(sessions);
+}
+function toMiles(value, unit) {
+    if (unit === 'km' || unit === 'kph') return value * KM_TO_MI;
+    return value;
+}
+function milesFromSession(session) {
+    const value = typeof session.distance === 'number' ? session.distance : parseFloat(session.distance);
+    if (isNaN(value)) return 0;
+    return toMiles(value, session.distanceUnit);
+}
+function mphToProtocol(mph) {
+    const kph = Math.min(6, Math.max(1, mph / KM_TO_MI));
+    return Math.round(kph * 1000);
+}
+function renderPeriodTotals(sessions) {
+    const el = document.getElementById('periodTotals');
+    if (!el || typeof dateFns === 'undefined') return;
+    const now = new Date();
+    const periods = [
+        ['Today', dateFns.startOfDay(now)],
+        ['This week', dateFns.startOfWeek(now)],
+        ['This month', dateFns.startOfMonth(now)],
+        ['This year', dateFns.startOfYear(now)]
+    ];
+    el.innerHTML = periods.map(([label, start]) => {
+        let distance = 0;
+        sessions.forEach((s) => {
+            const when = new Date(s.date);
+            if (isNaN(when.getTime()) || when < start || when > now) return;
+            distance += milesFromSession(s);
+        });
+        return '<div class="total-tile"><span>' + label + '</span><strong>' + distance.toFixed(2) + ' mi</strong></div>';
+    }).join('');
 }
 window.deleteSessionFromTable = deleteSession;
 
 // --- State ---
 let treadmillData = {};
 let connected = false;
+let androidListenOnly = false;
 let runningState = 3; // 0: Starting, 1: Running, 2: Paused, 3: Stopped
 let curTargetSpeed = 1000; // in treadmill units
 
@@ -138,6 +181,7 @@ function enableControls(enable) {
     speedUpBtn.disabled = !enable;
     speedDownBtn.disabled = !enable;
     speedSlider.disabled = !enable;
+    presetButtons.forEach((btn) => { btn.disabled = !enable; });
 }
 function updateRunningState(state) {
     runningState = state;
@@ -152,17 +196,17 @@ function updateRunningState(state) {
                 startBtn.textContent = "Start";
                 break;
             case 1: // Running
-                enableControls(true);
+                enableControls(!androidListenOnly);
                 startBtn.textContent = "Pause";
                 setStatus('Running');
                 break;
             case 2: // Paused
-                enableControls(true);
+                enableControls(!androidListenOnly);
                 startBtn.textContent = "Start";
                 setStatus('Paused');
                 break;
             case 3: // Stopped
-                enableControls(true);
+                enableControls(!androidListenOnly);
                 startBtn.textContent = "Start";
                 setStatus('Stopped');
                 break;
@@ -172,6 +216,45 @@ function updateRunningState(state) {
                 setStatus('Disconnected');
         }
     }
+    publishWidget();
+}
+function publishWidget(statusOverride, force) {
+    if (!window.PitPatAndroid || !window.PitPatAndroid.setWidgetState) return;
+    let status = statusOverride;
+    if (!status) {
+        if (!connected) status = 'Disconnected';
+        else if (runningState === 1) status = 'Running';
+        else if (runningState === 2) status = 'Paused';
+        else if (runningState === 0) status = 'Starting';
+        else status = 'Stopped';
+    }
+    const now = Date.now();
+    const key = String(connected) + '|' + runningState + '|' + status;
+    if (!force && key === publishWidget.lastKey && now - (publishWidget.lastAt || 0) < 500) return;
+    publishWidget.lastKey = key;
+    publishWidget.lastAt = now;
+    let speed = '-';
+    let time = '-';
+    let calories = '-';
+    let distance = '-';
+    if (connected && treadmillData) {
+        if (treadmillData.speed) speed = treadmillData.speed;
+        if (treadmillData.distance) distance = treadmillData.distance;
+        if (treadmillData.calories) calories = String(treadmillData.calories);
+        if (typeof treadmillData.duration === 'number') time = widgetClock(treadmillData.duration);
+    }
+    const preset = speedSlider ? speedSlider.value : '';
+    window.PitPatAndroid.setWidgetState(!!connected, runningState === 1, status, speed, time, calories, distance, preset);
+}
+function widgetClock(seconds) {
+    seconds = Math.max(0, Math.floor(seconds) || 0);
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    const mm = String(m).padStart(2, '0');
+    const ss = String(s).padStart(2, '0');
+    if (h > 0) return h + ':' + mm + ':' + ss;
+    return m + ':' + ss;
 }
 function formatDuration(seconds) {
     seconds = Math.floor(seconds);
@@ -263,6 +346,31 @@ function createWebBluetoothTransport() {
 }
 
 const transport = createWebBluetoothTransport();
+
+const androidWriteResolvers = [];
+function onAndroidWriteDone() {
+    androidWriteResolvers.splice(0).forEach((item) => item.resolve());
+}
+function onAndroidWriteFailed() {
+    androidWriteResolvers.splice(0).forEach((item) => item.reject(new Error("Android write failed")));
+}
+const androidTransport = {
+    canWrite() {
+        return !!(window.PitPatAndroid && connected);
+    },
+    write(packet) {
+        return new Promise((resolve, reject) => {
+            androidWriteResolvers.push({ resolve, reject });
+            window.PitPatAndroid.writeHex(packetHex(packet));
+        });
+    }
+};
+function beltTransport() {
+    if (window.PitPatAndroid && connected) return androidTransport;
+    return transport;
+}
+window.onAndroidWriteDone = onAndroidWriteDone;
+window.onAndroidWriteFailed = onAndroidWriteFailed;
 
 // --- Bluetooth Logic ---
 async function connectBluetooth() {
@@ -381,8 +489,8 @@ function renderPacketCapture() {
     } else {
         const parsed = decodeStatusPacket(dataViewFromHex(capture.statusHex));
         decodedEl.textContent = [
-            'Speed ' + (parsed.current_speed / 1000).toFixed(2) + ' ' + parsed.speed_unit,
-            'Distance ' + (parsed.distance / 1000).toFixed(2) + ' ' + parsed.distance_unit,
+            'Speed ' + toMiles(parsed.current_speed / 1000, parsed.speed_unit).toFixed(2) + ' mph',
+            'Distance ' + toMiles(parsed.distance / 1000, parsed.distance_unit).toFixed(2) + ' mi',
             'Steps ' + parsed.steps,
             'Time ' + formatDuration(Math.round(parsed.duration / 1000))
         ].join(' · ');
@@ -450,8 +558,8 @@ function handleNotification(value) {
     const speed_unit = parsed.speed_unit;
     const distance_unit = parsed.distance_unit;
     treadmillData = {
-        speed: (current_speed / 1000).toFixed(2) + " " + speed_unit,
-        distance: (distance / 1000).toFixed(2) + " " + distance_unit,
+        speed: toMiles(current_speed / 1000, speed_unit).toFixed(2) + " mph",
+        distance: toMiles(distance / 1000, distance_unit).toFixed(2) + " mi",
         calories: calories + " kcal",
         steps: steps,
         duration: Math.round(duration / 1000),
@@ -476,18 +584,10 @@ function handleNotification(value) {
             duration: Math.round(duration / 1000),
             speedSum: current_speed,
             speedCount: 1,
-            speedUnit: speed_unit
+            speedUnit: speed_unit,
+            distanceUnit: distance_unit
         };
-        // Save as first session
-        const avgSpeed = (sessionStartData.speedSum / sessionStartData.speedCount) / 1000;
-        upsertLiveSession({
-            date: sessionStartData.date,
-            duration: sessionStartData.duration,
-            steps: sessionStartData.steps,
-            calories: sessionStartData.calories + ' kcal',
-            avgSpeed: avgSpeed,
-            speedUnit: sessionStartData.speedUnit || ''
-        });
+        upsertLiveSession(currentSessionRecord());
     } else if (running_state === 1 && sessionActive && sessionStartData) {
         noteStatusPacket(value);
         // Update session stats
@@ -497,29 +597,28 @@ function handleNotification(value) {
         sessionStartData.duration = Math.round(duration / 1000);
         sessionStartData.speedSum += current_speed;
         sessionStartData.speedCount += 1;
-        // Update first session in treadmill_sessions
-        const avgSpeed = (sessionStartData.speedSum / sessionStartData.speedCount) / 1000;
-        upsertLiveSession({
-            date: sessionStartData.date,
-            duration: sessionStartData.duration,
-            steps: sessionStartData.steps,
-            calories: sessionStartData.calories + ' kcal',
-            avgSpeed: avgSpeed,
-            speedUnit: sessionStartData.speedUnit || ''
-        });
+        sessionStartData.distanceUnit = distance_unit;
+        upsertLiveSession(currentSessionRecord());
     } else if ((running_state === 3 || running_state === 2) && sessionActive && sessionStartData) {
         noteStatusPacket(value);
+        sessionStartData.steps = steps;
+        sessionStartData.calories = calories;
+        sessionStartData.distance = distance;
+        sessionStartData.duration = Math.round(duration / 1000);
+        sessionStartData.distanceUnit = distance_unit;
+        upsertLiveSession(currentSessionRecord());
         freezePacketCapture();
         // Session ended (Stopped or Paused)
         finishSession(running_state === 3 ? 'Stopped' : 'Paused');
     }
 
     // --- Heartbeat/data send logic, like _notification_handler ---
-    if (transport.canWrite()) {
+    const link = beltTransport();
+    if (link.canWrite()) {
         if (pendingData) {
             const packet = pendingData;
             console.log("Sending pending data packet:", Array.from(packet).map(b => b.toString(16).padStart(2, "0")).join(" "));
-            transport.write(packet).then(() => {
+            link.write(packet).then(() => {
                 console.log("Pending data sent.");
                 noteStartCommand(packet);
                 pendingData = null;
@@ -530,7 +629,7 @@ function handleNotification(value) {
             // Heartbeat packet: 6a05fdf843
             const heartbeat = new Uint8Array([0x6a, 0x05, 0xfd, 0xf8, 0x43]);
             console.log("Sending heartbeat packet:", Array.from(heartbeat).map(b => b.toString(16).padStart(2, "0")).join(" "));
-            transport.write(heartbeat).catch(err => {
+            link.write(heartbeat).catch(err => {
                 console.error("Failed to send heartbeat:", err);
             });
         }
@@ -538,10 +637,11 @@ function handleNotification(value) {
 }
 
 async function sendCommand(packet) {
-    if (!transport.canWrite()) return;
+    const link = beltTransport();
+    if (!link.canWrite()) return;
     try {
         console.log("Sending command packet:", Array.from(packet).map(b => b.toString(16).padStart(2, "0")).join(" "));
-        await transport.write(packet);
+        await link.write(packet);
     } catch (err) {
         console.error("Failed to send command:", err);
         showToast("Failed to send command: " + err);
@@ -587,46 +687,120 @@ function makePacket(type, speed = 1000) {
 }
 
 // --- UI Event Handlers ---
+function showAndroidScanStatus(message) {
+    const box = document.getElementById('scanResults');
+    if (!box) return;
+    box.style.display = 'block';
+    let status = document.getElementById('scanStatus');
+    if (!status) {
+        status = document.createElement('div');
+        status.id = 'scanStatus';
+        box.prepend(status);
+    }
+    status.textContent = message;
+    if (!connected) publishWidget(message);
+}
+function showAndroidScanResult(name, address) {
+    const box = document.getElementById('scanResults');
+    if (!box || !name || !address) return;
+    box.style.display = 'block';
+    showAndroidScanStatus('Tap a pad to listen');
+    const items = box.querySelectorAll('[data-device]');
+    for (const item of items) {
+        if (item.dataset.device === address) return;
+    }
+    const line = document.createElement('div');
+    line.dataset.device = address;
+    line.textContent = name;
+    line.style.fontSize = '1.2em';
+    line.style.marginTop = '0.4em';
+    line.style.textDecoration = 'underline';
+    line.addEventListener('click', () => {
+        showAndroidScanStatus('Connecting to ' + name + '…');
+        window.PitPatAndroid.connect(address);
+    });
+    box.appendChild(line);
+}
+function onAndroidConnected() {
+    connected = true;
+    androidListenOnly = false;
+    connectBtn.textContent = "Disconnect";
+    updateRunningState(3);
+}
+function onAndroidDisconnected() {
+    const hadSession = sessionActive && sessionStartData;
+    connected = false;
+    androidListenOnly = false;
+    connectBtn.textContent = "Connect";
+    updateRunningState(3);
+    if (hadSession) finishSession('Disconnected');
+}
+function onAndroidNotification(bytes) {
+    const data = new Uint8Array(bytes);
+    handleNotification(new DataView(data.buffer));
+}
+window.showAndroidScanStatus = showAndroidScanStatus;
+window.showAndroidScanResult = showAndroidScanResult;
+window.onAndroidConnected = onAndroidConnected;
+window.onAndroidDisconnected = onAndroidDisconnected;
+window.onAndroidNotification = onAndroidNotification;
+
 connectBtn.addEventListener('click', () => {
+    if (window.PitPatAndroid) {
+        if (!connected) {
+            const box = document.getElementById('scanResults');
+            if (box) {
+                box.style.display = 'block';
+                box.innerHTML = '';
+            }
+            showAndroidScanStatus('Connecting…');
+            if (window.PitPatAndroid.connectLast) window.PitPatAndroid.connectLast();
+            else window.PitPatAndroid.startScan();
+        } else {
+            window.PitPatAndroid.disconnect();
+        }
+        return;
+    }
     if (!connected) connectBluetooth();
     else disconnectBluetooth();
 });
 
-startBtn.addEventListener('click', async () => {
-    if (!connected) return;
-    if (runningState === 1) { // Running -> Pause
-        send_data(makePacket("pause"));
-    } else { // Start
-        // Show countdown overlay (visual only, do not delay command)
-        if (countdownOverlay && countdownNumber) {
-            countdownOverlay.style.display = 'flex';
-            countdownOverlay.style.opacity = '1';
-            let count = 3;
-            countdownNumber.textContent = count;
-            countdownNumber.style.opacity = '1';
-            countdownNumber.style.transform = 'scale(1)';
-            // Animate countdown in background
-            (async () => {
-                for (let i = 0; i < 3; i++) {
-                    await new Promise(res => setTimeout(res, 700));
-                    countdownNumber.style.transform = 'scale(1.3)';
-                    countdownNumber.style.opacity = '0.5';
-                    await new Promise(res => setTimeout(res, 200));
-                    count--;
-                    if (count > 0) {
-                        countdownNumber.textContent = count;
-                        countdownNumber.style.opacity = '1';
-                        countdownNumber.style.transform = 'scale(1)';
-                    }
+function startWalk() {
+    if (countdownOverlay && countdownNumber) {
+        countdownOverlay.style.display = 'flex';
+        countdownOverlay.style.opacity = '1';
+        let count = 3;
+        countdownNumber.textContent = count;
+        countdownNumber.style.opacity = '1';
+        countdownNumber.style.transform = 'scale(1)';
+        (async () => {
+            for (let i = 0; i < 3; i++) {
+                await new Promise(res => setTimeout(res, 700));
+                countdownNumber.style.transform = 'scale(1.3)';
+                countdownNumber.style.opacity = '0.5';
+                await new Promise(res => setTimeout(res, 200));
+                count--;
+                if (count > 0) {
+                    countdownNumber.textContent = count;
+                    countdownNumber.style.opacity = '1';
+                    countdownNumber.style.transform = 'scale(1)';
                 }
-                await new Promise(res => setTimeout(res, 400));
-                countdownOverlay.style.opacity = '0';
-                await new Promise(res => setTimeout(res, 500)); // Wait for fade-out
-                countdownOverlay.style.display = 'none';
-                countdownOverlay.style.opacity = '1'; // Reset for next time
-            })();
-        }
-        send_data(makePacket("start", curTargetSpeed));
+            }
+            await new Promise(res => setTimeout(res, 400));
+            countdownOverlay.style.opacity = '0';
+            await new Promise(res => setTimeout(res, 500));
+            countdownOverlay.style.display = 'none';
+            countdownOverlay.style.opacity = '1';
+        })();
+    }
+    send_data(makePacket("start", curTargetSpeed));
+}
+startBtn.addEventListener('click', () => {
+    if (!connected) return;
+    if (runningState === 1) {
+        send_data(makePacket("pause"));
+    } else {
+        startWalk();
     }
 });
 
@@ -635,15 +809,26 @@ stopBtn.addEventListener('click', () => {
     send_data(makePacket("stop"));
 });
 
+function setSliderMph(mph) {
+    const clamped = Math.min(3.7, Math.max(0.6, Math.round(mph * 10) / 10));
+    const label = clamped.toFixed(1);
+    speedSlider.value = label;
+    sliderValue.textContent = label;
+    if (speedSlider.MaterialSlider) speedSlider.MaterialSlider.change(clamped);
+    curTargetSpeed = mphToProtocol(clamped);
+    presetButtons.forEach((btn) => {
+        btn.classList.toggle('is-selected', parseFloat(btn.dataset.mph).toFixed(1) === label);
+    });
+}
 speedUpBtn.addEventListener('click', () => {
     if (!connected) return;
-    curTargetSpeed = Math.min(curTargetSpeed + 100, 6000);
+    setSliderMph(parseFloat(speedSlider.value) + 0.1);
     send_data(makePacket("set_speed", curTargetSpeed));
 });
 
 speedDownBtn.addEventListener('click', () => {
     if (!connected) return;
-    curTargetSpeed = Math.max(curTargetSpeed - 1000, 1000);
+    setSliderMph(parseFloat(speedSlider.value) - 0.1);
     send_data(makePacket("set_speed", curTargetSpeed));
 });
 
@@ -651,15 +836,65 @@ speedSlider.addEventListener('input', () => {
     sliderValue.textContent = speedSlider.value;
 });
 speedSlider.addEventListener('change', () => {
+    setSliderMph(parseFloat(speedSlider.value));
     if (!connected) return;
-    curTargetSpeed = Math.round(parseFloat(speedSlider.value) * 1000);
     send_data(makePacket("set_speed", curTargetSpeed));
 });
+function usePresetMph(mph, startIfConnected) {
+    setSliderMph(mph);
+    if (!connected) return false;
+    if (!startIfConnected) return true;
+    if (runningState === 1) {
+        send_data(makePacket("set_speed", curTargetSpeed));
+    } else if (runningState !== 0) {
+        startWalk();
+    }
+    publishWidget(null, true);
+    return true;
+}
+presetButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+        if (!connected || btn.disabled) return;
+        usePresetMph(parseFloat(btn.dataset.mph), true);
+    });
+});
+window.applyWidgetAction = function (action) {
+    if (action === 'connect') {
+        if (connected && window.PitPatAndroid) {
+            window.PitPatAndroid.disconnect();
+        } else if (window.PitPatAndroid && window.PitPatAndroid.connectLast) {
+            window.PitPatAndroid.connectLast();
+        } else {
+            connectBtn.click();
+        }
+        return;
+    }
+    const mph = parseFloat(action);
+    if (!isNaN(mph)) {
+        if (!connected) {
+            setSliderMph(mph);
+            publishWidget('Connect first', true);
+            return;
+        }
+        usePresetMph(mph, true);
+        return;
+    }
+    if (!connected) {
+        showToast('Connect to the pad first.');
+        publishWidget('Connect first', true);
+        return;
+    }
+    if (runningState === 1) {
+        send_data(makePacket('pause'));
+    } else if (runningState !== 0) {
+        startWalk();
+    }
+};
 
 // --- Initialize ---
 updateDashboard({});
 updateRunningState(3);
-sliderValue.textContent = speedSlider.value;
+setSliderMph(parseFloat(speedSlider.value));
 renderSessionTable();
 renderPacketCapture();
 
@@ -675,6 +910,19 @@ function clearCurrentSession() {
     localStorage.removeItem('treadmill_current_session');
 }
 
+function currentSessionRecord() {
+    const rawAvg = (sessionStartData.speedSum / sessionStartData.speedCount) / 1000;
+    return {
+        date: sessionStartData.date,
+        duration: sessionStartData.duration,
+        steps: sessionStartData.steps,
+        calories: sessionStartData.calories + ' kcal',
+        avgSpeed: toMiles(rawAvg, sessionStartData.speedUnit),
+        speedUnit: 'mph',
+        distance: toMiles(sessionStartData.distance / 1000, sessionStartData.distanceUnit),
+        distanceUnit: 'mi'
+    };
+}
 function upsertLiveSession(session) {
     let sessions = loadSessions();
     if (sessions.length > 0 && sessions[0] && sessions[0].date === session.date) {

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PitPat</string>
+    <string name="widget_name">PitPat</string>
+    <string name="widget_description">Connect, start, set speed, and see the live walk</string>
+    <string name="widget_connect">Connect</string>
+    <string name="widget_start">Start</string>
+    <string name="widget_disconnected">Disconnected</string>
+</resources>
